@@ -32,7 +32,7 @@ jobs:
       - name: Install dependencies
         run: bun install
       - name: Run unit tests
-        run: bun test:unit
+        run: bun run test:unit
   integration-tests:
     name: Integration Tests
     runs-on: ubuntu-latest
@@ -48,4 +48,4 @@ jobs:
       - name: Build
         run: bun run build
       - name: Run integration tests
-        run: bun test:integration
+        run: bun run test:integration
