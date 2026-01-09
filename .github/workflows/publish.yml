@@ -27,8 +27,11 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - name: Update npm
+        run: npm install -g npm@latest
       - name: Publish to npm
-        run: npm publish --provenance --access public
+        run: npm publish --access public
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
