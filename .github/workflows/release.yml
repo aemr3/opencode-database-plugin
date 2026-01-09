@@ -5,13 +5,18 @@ on:
       - main
 permissions:
   contents: write
-  pull-requests: write
 jobs:
   release:
     name: Release
+    if: "!startsWith(github.event.head_commit.message, 'chore(release):')"
     runs-on: ubuntu-latest
     steps:
-      - name: Release
-        uses: googleapis/release-please-action@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
-          release-type: node
+          fetch-depth: 0
+      - name: Bump version
+        uses: commitizen-tools/commitizen-action@master
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          changelog_increment_filename: CHANGELOG.md
