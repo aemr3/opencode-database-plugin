@@ -1,7 +1,9 @@
-## Unreleased
+## v1.0.6 (2026-01-09)
 
 ### Fix
 
+- Remove changelog_increment_filename to avoid incremental mode
+- Add proper CHANGELOG.md with commitizen format
 - Remove old CHANGELOG and simplify release workflow
 - Add explicit fetch-tags to checkout
 - Add debug mode to release workflow
