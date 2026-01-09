@@ -1,6 +1,6 @@
 {
   "name": "opencode-database-plugin",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "OpenCode plugin that logs sessions, messages, tool executions, and token usage to PostgreSQL",
   "type": "module",
   "main": "./dist/index.js",

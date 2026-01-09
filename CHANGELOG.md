@@ -1,3 +1,9 @@
+## v1.0.7 (2026-01-09)
+
+### Fix
+
+- Add version_files to update package.json on bump
+
 ## v1.0.6 (2026-01-09)
 
 ### Fix
