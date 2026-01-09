@@ -16,6 +16,13 @@ jobs:
         with:
           fetch-depth: 0
           token: ${{ secrets.PAT }}
+      - name: Debug tags
+        run: |
+          echo "=== Git tags ==="
+          git tag -l
+          echo "=== Fetch tags explicitly ==="
+          git fetch --tags
+          git tag -l
       - name: Bump version
         uses: commitizen-tools/commitizen-action@master
         with:
