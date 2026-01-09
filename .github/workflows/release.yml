@@ -21,4 +21,4 @@ jobs:
         uses: commitizen-tools/commitizen-action@master
         with:
           github_token: ${{ secrets.PAT }}
-          changelog_increment_filename: CHANGELOG.md
+          changelog: false
