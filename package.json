@@ -50,5 +50,8 @@
   },
   "peerDependencies": {
     "@opencode-ai/plugin": "*"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }
