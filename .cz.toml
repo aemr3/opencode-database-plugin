@@ -3,4 +3,4 @@ name = "cz_conventional_commits"
 version_provider = "npm"
 tag_format = "v$version"
 update_changelog_on_bump = true
-bump_message = "chore(release): $new_version"
+bump_message = "chore(release): v$new_version"
