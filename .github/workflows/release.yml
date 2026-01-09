@@ -15,18 +15,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          fetch-tags: true
           token: ${{ secrets.PAT }}
-      - name: Debug tags
-        run: |
-          echo "=== Git tags ==="
-          git tag -l
-          echo "=== Fetch tags explicitly ==="
-          git fetch --tags
-          git tag -l
       - name: Bump version
         uses: commitizen-tools/commitizen-action@master
         with:
           github_token: ${{ secrets.PAT }}
           changelog_increment_filename: CHANGELOG.md
-          debug: "true"
