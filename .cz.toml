@@ -1,7 +1,0 @@
-[tool.commitizen]
-name = "cz_conventional_commits"
-version_provider = "scm"
-version_files = ["package.json:version"]
-tag_format = "v$version"
-update_changelog_on_bump = true
-bump_message = "chore(release): v$new_version"
