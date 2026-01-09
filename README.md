@@ -69,7 +69,7 @@ bun install
 bun run typecheck
 
 # Run unit tests
-bun test
+bun run test
 
 # Run integration tests
 bun run test:integration
