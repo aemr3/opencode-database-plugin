@@ -1,3 +1,9 @@
+## v1.0.8 (2026-01-09)
+
+### Fix
+
+- Add changelog to GitHub releases
+
 ## v1.0.7 (2026-01-09)
 
 ### Fix
