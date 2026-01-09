@@ -1,0 +1,54 @@
+{
+  "name": "opencode-database-plugin",
+  "version": "1.0.0",
+  "description": "OpenCode plugin that logs sessions, messages, tool executions, and token usage to PostgreSQL",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "test": "bun test __tests__/unit",
+    "test:unit": "bun test __tests__/unit",
+    "test:integration": "bun test __tests__/integration --timeout 180000",
+    "test:all": "bun test --timeout 180000",
+    "build": "bun build ./index.ts --outdir ./dist --target node --format esm && bun run build:types",
+    "build:types": "bun x tsc --declaration --emitDeclarationOnly --outDir dist",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "bun run build"
+  },
+  "keywords": [
+    "opencode",
+    "plugin",
+    "database",
+    "postgres",
+    "analytics"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aemr3/opencode-database-plugin.git"
+  },
+  "bugs": {
+    "url": "https://github.com/aemr3/opencode-database-plugin/issues"
+  },
+  "homepage": "https://github.com/aemr3/opencode-database-plugin#readme",
+  "dependencies": {
+    "postgres": "^3.4.5"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "latest",
+    "@types/bun": "latest",
+    "typescript": "^5.9.3"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": "*"
+  }
+}

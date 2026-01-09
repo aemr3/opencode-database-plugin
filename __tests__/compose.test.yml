@@ -1,0 +1,38 @@
+services:
+  opencode:
+    image: ghcr.io/anomalyco/opencode:latest
+    command:
+      - serve
+      - --hostname
+      - 0.0.0.0
+      - --port
+      - "4096"
+      - --log-level
+      - DEBUG
+      - --print-logs
+    ports:
+      - 24096:4096
+    volumes:
+      - ../dist/index.js:/root/.config/opencode/plugin/database-plugin.js:ro
+    environment:
+      - OPENCODE_DATABASE_URL=postgres://opencode:opencode@postgres:5432/opencode
+    depends_on:
+      postgres:
+        condition: service_healthy
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - 25432:5432
+    environment:
+      POSTGRES_USER: opencode
+      POSTGRES_PASSWORD: opencode
+      POSTGRES_DB: opencode
+    volumes:
+      - ../sql/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U opencode
+      interval: 2s
+      timeout: 5s
+      retries: 10
