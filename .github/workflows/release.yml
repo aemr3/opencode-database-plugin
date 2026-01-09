@@ -14,5 +14,4 @@ jobs:
       - name: Release
         uses: googleapis/release-please-action@v4
         with:
-          config-file: .github/release-config.json
-          manifest-file: .github/release-manifest.json
+          release-type: node
