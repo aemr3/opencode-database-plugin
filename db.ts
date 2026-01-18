@@ -10,7 +10,7 @@ const QUERY_TIMEOUT = parseInt(
 );
 
 export const sql = postgres(DATABASE_URL, {
-  max: 10,
+  max: 30,
   idle_timeout: 30,
   connect_timeout: 10,
   max_lifetime: 60 * 30,
