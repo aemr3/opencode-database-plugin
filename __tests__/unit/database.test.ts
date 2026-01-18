@@ -28,6 +28,9 @@ const mockSql = Object.assign(
 
 const mockEnsureConnection = () => Promise.resolve(dbConnected);
 
+// Track fireAndForget promises for test synchronization
+let fireAndForgetPromises: Promise<unknown>[] = [];
+
 // Mock database module before importing plugin
 mock.module("../../db", () => ({
   sql: mockSql,
@@ -35,7 +38,8 @@ mock.module("../../db", () => ({
   isDatabaseHealthy: () => dbConnected,
   fireAndForget: (fn: () => Promise<unknown>, onError?: (error: unknown) => void) => {
     if (!dbConnected) return;
-    fn().catch((e) => onError?.(e));
+    const promise = fn().catch((e) => onError?.(e));
+    fireAndForgetPromises.push(promise);
   },
   safeQuery: async <T>(fn: () => Promise<T>) => {
     if (!dbConnected) return undefined;
@@ -43,6 +47,12 @@ mock.module("../../db", () => ({
   },
   jsonb: (value: unknown) => ({ toJSON: () => value }),
 }));
+
+// Helper to wait for all fireAndForget operations to complete
+async function flushFireAndForget() {
+  await Promise.all(fireAndForgetPromises);
+  fireAndForgetPromises = [];
+}
 
 // Import after mocking
 import { DatabasePlugin, generateCorrelationId } from "../../index";
@@ -70,6 +80,7 @@ beforeEach(() => {
   sqlCalls = [];
   dbConnected = true;
   mockSelectResponse = [];
+  fireAndForgetPromises = [];
 });
 
 describe("generateCorrelationId", () => {
@@ -133,6 +144,8 @@ describe("Session Events", () => {
       } as any,
     });
 
+    await flushFireAndForget();
+
     expect(sqlCalls.length).toBe(1);
     expect(sqlCalls[0]!.query).toContain("INSERT INTO sessions");
     expect(sqlCalls[0]!.values).toContain("sess-123");
@@ -152,6 +165,8 @@ describe("Session Events", () => {
         },
       } as any,
     });
+
+    await flushFireAndForget();
 
     expect(sqlCalls.length).toBe(1);
     expect(sqlCalls[0]!.values).toContain("sess-minimal");
@@ -174,6 +189,8 @@ describe("Session Events", () => {
       } as any,
     });
 
+    await flushFireAndForget();
+
     expect(sqlCalls.length).toBe(1);
     expect(sqlCalls[0]!.query).toContain("UPDATE sessions");
     expect(sqlCalls[0]!.values).toContain("Updated Title");
@@ -192,6 +209,8 @@ describe("Session Events", () => {
       } as any,
     });
 
+    await flushFireAndForget();
+
     expect(sqlCalls.length).toBe(1);
     expect(sqlCalls[0]!.query).toContain("UPDATE sessions");
     expect(sqlCalls[0]!.query).toContain("deleted_at");
@@ -208,6 +227,8 @@ describe("Session Events", () => {
       } as any,
     });
 
+    await flushFireAndForget();
+
     expect(sqlCalls.length).toBe(1);
     expect(sqlCalls[0]!.query).toContain("UPDATE sessions");
     expect(sqlCalls[0]!.query).toContain("idle");
@@ -222,6 +243,8 @@ describe("Session Events", () => {
         properties: { sessionID: "sess-123" },
       } as any,
     });
+
+    await flushFireAndForget();
 
     // session.status events are ignored to prevent race conditions
     // Active status is set via message.updated events instead
@@ -244,6 +267,8 @@ describe("Session Events", () => {
       } as any,
     });
 
+    await flushFireAndForget();
+
     expect(sqlCalls.length).toBe(2);
     // First: insert error record
     expect(sqlCalls[0]!.query).toContain("INSERT INTO session_errors");
@@ -263,6 +288,8 @@ describe("Session Events", () => {
         properties: {},
       } as any,
     });
+
+    await flushFireAndForget();
 
     // Should not insert anything if sessionID is missing
     expect(sqlCalls.length).toBe(0);
@@ -290,6 +317,8 @@ describe("Session Events", () => {
         properties: { sessionID: "sess-123" },
       } as any,
     });
+
+    await flushFireAndForget();
 
     // 3 calls: SELECT session state, INSERT compaction record, UPDATE session status
     expect(sqlCalls.length).toBe(3);
@@ -320,8 +349,11 @@ describe("Message Events", () => {
       } as any,
     });
 
-    // First ensures session exists, then inserts message
+    await flushFireAndForget();
+
+    // 2 calls in sequence: insert session, then insert message
     expect(sqlCalls.length).toBe(2);
+    expect(sqlCalls[0]!.query).toContain("INSERT INTO sessions");
     expect(sqlCalls[1]!.query).toContain("INSERT INTO messages");
     expect(sqlCalls[1]!.values).toContain("msg-123");
     expect(sqlCalls[1]!.values).toContain("sess-456");
@@ -337,6 +369,8 @@ describe("Message Events", () => {
         properties: { messageID: "msg-123" },
       } as any,
     });
+
+    await flushFireAndForget();
 
     expect(sqlCalls.length).toBe(1);
     expect(sqlCalls[0]!.query).toContain("DELETE FROM messages");
@@ -363,11 +397,20 @@ describe("Message Part Events", () => {
       } as any,
     });
 
-    // 5 calls: ensure message, ensure session, insert part, update part (longer text check), update message text
+    await flushFireAndForget();
+
+    // 5 calls: insert session, insert message, insert part, update part, update message text
     expect(sqlCalls.length).toBe(5);
-    expect(sqlCalls[2]!.query).toContain("INSERT INTO message_parts");
-    expect(sqlCalls[2]!.values).toContain("part-123");
-    expect(sqlCalls[2]!.values).toContain("text");
+    const queries = sqlCalls.map((c) => c.query);
+    expect(queries.some((q) => q.includes("INSERT INTO sessions"))).toBe(true);
+    expect(queries.some((q) => q.includes("INSERT INTO messages"))).toBe(true);
+    expect(queries.some((q) => q.includes("INSERT INTO message_parts"))).toBe(true);
+    
+    // Check that message_parts insert has correct values
+    const partInsert = sqlCalls.find((c) => c.query.includes("INSERT INTO message_parts"));
+    expect(partInsert).toBeDefined();
+    expect(partInsert!.values).toContain("part-123");
+    expect(partInsert!.values).toContain("text");
   });
 
   test("message.part.updated extracts tool name for tool parts", async () => {
@@ -388,8 +431,12 @@ describe("Message Part Events", () => {
       } as any,
     });
 
-    // 4 calls: ensure message, ensure session, insert part, update part (status priority check)
+    await flushFireAndForget();
+
+    // 4 calls: insert session, insert message, insert part, update part (status priority check)
     expect(sqlCalls.length).toBe(4);
+    expect(sqlCalls[0]!.query).toContain("INSERT INTO sessions");
+    expect(sqlCalls[1]!.query).toContain("INSERT INTO messages");
     expect(sqlCalls[2]!.values).toContain("bash");
   });
 
@@ -402,6 +449,8 @@ describe("Message Part Events", () => {
         properties: { partID: "part-123" },
       } as any,
     });
+
+    await flushFireAndForget();
 
     expect(sqlCalls.length).toBe(1);
     expect(sqlCalls[0]!.query).toContain("DELETE FROM message_parts");
@@ -423,6 +472,8 @@ describe("Command Events", () => {
         },
       } as any,
     });
+
+    await flushFireAndForget();
 
     expect(sqlCalls.length).toBe(1);
     expect(sqlCalls[0]!.query).toContain("INSERT INTO commands");
@@ -599,8 +650,12 @@ describe("Reasoning/Thinking Parts", () => {
       } as any,
     });
 
-    // 4 calls: ensure message, ensure session, insert part, update part (longer text check)
+    await flushFireAndForget();
+
+    // 4 calls: insert session, insert message, insert part, update part
     expect(sqlCalls.length).toBe(4);
+    expect(sqlCalls[0]!.query).toContain("INSERT INTO sessions");
+    expect(sqlCalls[1]!.query).toContain("INSERT INTO messages");
     expect(sqlCalls[2]!.query).toContain("INSERT INTO message_parts");
     expect(sqlCalls[2]!.values).toContain("reasoning");
     expect(sqlCalls[2]!.values).toContain(reasoningText);
@@ -625,8 +680,12 @@ describe("Reasoning/Thinking Parts", () => {
       } as any,
     });
 
-    // 4 calls: ensure message, ensure session, insert part, update part (longer text check)
+    await flushFireAndForget();
+
+    // 4 calls: insert session, insert message, insert part, update part (longer text check)
     expect(sqlCalls.length).toBe(4);
+    expect(sqlCalls[0]!.query).toContain("INSERT INTO sessions");
+    expect(sqlCalls[1]!.query).toContain("INSERT INTO messages");
     expect(sqlCalls[2]!.values).toContain("The user");
   });
 });
@@ -656,8 +715,12 @@ describe("Tool Part Content", () => {
       } as any,
     });
 
-    // 4 calls: ensure message, ensure session, insert part, update part (status priority)
+    await flushFireAndForget();
+
+    // 4 calls: insert session, insert message, insert part, update part (status priority)
     expect(sqlCalls.length).toBe(4);
+    expect(sqlCalls[0]!.query).toContain("INSERT INTO sessions");
+    expect(sqlCalls[1]!.query).toContain("INSERT INTO messages");
     expect(sqlCalls[2]!.query).toContain("INSERT INTO message_parts");
     // Verify the full part object is stored in content via jsonb helper
     const contentValue = sqlCalls[2]!.values.find(
@@ -693,8 +756,12 @@ describe("Tool Part Content", () => {
       } as any,
     });
 
-    // 4 calls: ensure message, ensure session, insert part, update part (status priority)
+    await flushFireAndForget();
+
+    // 4 calls: insert session, insert message, insert part, update part (status priority)
     expect(sqlCalls.length).toBe(4);
+    expect(sqlCalls[0]!.query).toContain("INSERT INTO sessions");
+    expect(sqlCalls[1]!.query).toContain("INSERT INTO messages");
     const contentValue = sqlCalls[2]!.values.find(
       (v) => typeof v === "object" && v !== null && "toJSON" in v,
     );
@@ -725,7 +792,9 @@ describe("Tool Part Content", () => {
       } as any,
     });
 
+    await flushFireAndForget();
     sqlCalls = []; // Reset for second call
+    fireAndForgetPromises = [];
 
     // Second: completed state with output
     await hooks.event?.({
@@ -748,8 +817,12 @@ describe("Tool Part Content", () => {
       } as any,
     });
 
-    // 4 calls: ensure message, ensure session, insert part, update part (status priority)
+    await flushFireAndForget();
+
+    // 4 calls: insert session, insert message, insert part, update part (status priority)
     expect(sqlCalls.length).toBe(4);
+    expect(sqlCalls[0]!.query).toContain("INSERT INTO sessions");
+    expect(sqlCalls[1]!.query).toContain("INSERT INTO messages");
     // Should use INSERT ... ON CONFLICT DO NOTHING followed by UPDATE
     expect(sqlCalls[2]!.query).toContain("ON CONFLICT");
     const contentValue = sqlCalls[2]!.values.find(
@@ -787,8 +860,12 @@ describe("Tool Execution and Message Part Linking", () => {
       } as any,
     });
 
-    // 4 calls: ensure message, ensure session, insert part, update part (status priority)
+    await flushFireAndForget();
+
+    // 4 calls: insert session, insert message, insert part, update part (status priority)
     expect(sqlCalls.length).toBe(4);
+    expect(sqlCalls[0]!.query).toContain("INSERT INTO sessions");
+    expect(sqlCalls[1]!.query).toContain("INSERT INTO messages");
     expect(sqlCalls[2]!.query).toContain("INSERT INTO message_parts");
   });
 

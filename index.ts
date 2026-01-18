@@ -343,14 +343,6 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
           case "message.updated": {
             const info = props.info as MessageInfo;
 
-            fireAndForget(
-              () => sql`
-              INSERT INTO sessions (id, status, created_at, updated_at)
-              VALUES (${info.sessionID}, 'active', NOW(), NOW())
-              ON CONFLICT (id) DO UPDATE SET updated_at = NOW()
-            `
-            );
-
             let messageContent:
               | Array<{ type: string; text?: string }>
               | undefined = info.parts;
@@ -383,29 +375,37 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
             const modelId = info.modelID || info.model?.modelID || null;
 
             fireAndForget(
-              () => sql`
-              INSERT INTO messages (id, session_id, role, model_provider, model_id, text, summary, content, system_prompt, created_at)
-              VALUES (
-                ${info.id},
-                ${info.sessionID},
-                ${info.role},
-                ${modelProvider},
-                ${modelId},
-                ${textContent},
-                ${info.summary?.title || null},
-                ${messageContent ? sql.json(messageContent as postgres.JSONValue) : null},
-                ${systemPrompt},
-                NOW()
-              )
-              ON CONFLICT (id) DO UPDATE SET
-                role = ${info.role},
-                model_provider = COALESCE(EXCLUDED.model_provider, messages.model_provider),
-                model_id = COALESCE(EXCLUDED.model_id, messages.model_id),
-                text = COALESCE(${textContent}, messages.text),
-                summary = COALESCE(${info.summary?.title || null}, messages.summary),
-                content = COALESCE(${messageContent ? sql.json(messageContent as postgres.JSONValue) : null}, messages.content),
-                system_prompt = COALESCE(${systemPrompt}, messages.system_prompt)
-            `,
+              async () => {
+                await sql`
+                  INSERT INTO sessions (id, status, created_at, updated_at)
+                  VALUES (${info.sessionID}, 'active', NOW(), NOW())
+                  ON CONFLICT (id) DO UPDATE SET updated_at = NOW()
+                `;
+
+                await sql`
+                  INSERT INTO messages (id, session_id, role, model_provider, model_id, text, summary, content, system_prompt, created_at)
+                  VALUES (
+                    ${info.id},
+                    ${info.sessionID},
+                    ${info.role},
+                    ${modelProvider},
+                    ${modelId},
+                    ${textContent},
+                    ${info.summary?.title || null},
+                    ${messageContent ? sql.json(messageContent as postgres.JSONValue) : null},
+                    ${systemPrompt},
+                    NOW()
+                  )
+                  ON CONFLICT (id) DO UPDATE SET
+                    role = ${info.role},
+                    model_provider = COALESCE(EXCLUDED.model_provider, messages.model_provider),
+                    model_id = COALESCE(EXCLUDED.model_id, messages.model_id),
+                    text = COALESCE(${textContent}, messages.text),
+                    summary = COALESCE(${info.summary?.title || null}, messages.summary),
+                    content = COALESCE(${messageContent ? sql.json(messageContent as postgres.JSONValue) : null}, messages.content),
+                    system_prompt = COALESCE(${systemPrompt}, messages.system_prompt)
+                `;
+              },
               (error) =>
                 logError(client, "Error in message.updated", {
                   error: String(error),
@@ -491,29 +491,26 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
               );
             }
 
-            fireAndForget(
-              () => sql`
-              INSERT INTO messages (id, session_id, role, created_at)
-              VALUES (${part.messageID}, ${part.sessionID}, 'assistant', NOW())
-              ON CONFLICT (id) DO UPDATE SET
-                role = COALESCE(messages.role, 'assistant')
-            `
-            );
-
-            fireAndForget(
-              () => sql`
-              INSERT INTO sessions (id, status, created_at)
-              VALUES (${part.sessionID}, 'active', NOW())
-              ON CONFLICT (id) DO NOTHING
-            `
-            );
-
             const isStreamingTextPart =
               part.type === "text" || part.type === "reasoning";
             const partAsJson = { ...part };
 
             if (isStreamingTextPart) {
               fireAndForget(async () => {
+                // Insert in correct order: session -> message -> message_parts
+                await sql`
+                  INSERT INTO sessions (id, status, created_at)
+                  VALUES (${part.sessionID}, 'active', NOW())
+                  ON CONFLICT (id) DO NOTHING
+                `;
+
+                await sql`
+                  INSERT INTO messages (id, session_id, role, created_at)
+                  VALUES (${part.messageID}, ${part.sessionID}, 'assistant', NOW())
+                  ON CONFLICT (id) DO UPDATE SET
+                    role = COALESCE(messages.role, 'assistant')
+                `;
+
                 await sql`
                   INSERT INTO message_parts (id, message_id, part_type, tool_name, text, content, created_at)
                   VALUES (
@@ -551,6 +548,20 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
               const currentPriority = statusPriority[currentStatus] || 0;
 
               fireAndForget(async () => {
+                // Insert in correct order: session -> message -> message_parts
+                await sql`
+                  INSERT INTO sessions (id, status, created_at)
+                  VALUES (${part.sessionID}, 'active', NOW())
+                  ON CONFLICT (id) DO NOTHING
+                `;
+
+                await sql`
+                  INSERT INTO messages (id, session_id, role, created_at)
+                  VALUES (${part.messageID}, ${part.sessionID}, 'assistant', NOW())
+                  ON CONFLICT (id) DO UPDATE SET
+                    role = COALESCE(messages.role, 'assistant')
+                `;
+
                 await sql`
                   INSERT INTO message_parts (id, message_id, part_type, tool_name, text, content, created_at)
                   VALUES (
