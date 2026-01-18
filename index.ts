@@ -1,6 +1,11 @@
-import type { Plugin } from "@opencode-ai/plugin";
-import { sql, ensureConnection } from "./db";
+import type { Plugin, PluginInput } from "@opencode-ai/plugin";
+import { sql, ensureConnection, fireAndForget, safeQuery } from "./db";
 import type postgres from "postgres";
+
+type OpencodeClient = PluginInput["client"];
+
+const STALE_ENTRY_TIMEOUT_MS = 15 * 60 * 1000;
+const CLEANUP_INTERVAL_MS = 60 * 1000;
 
 const pendingExecutions = new Map<
   string,
@@ -25,8 +30,47 @@ const pendingUserMessages = new Map<
   }
 >();
 
-// Track counted messages per session to avoid double-counting tokens
-const tokensCountedBySession = new Map<string, Set<string>>();
+const tokensCountedBySession = new Map<string, Map<string, number>>();
+const callIdTimestamps = new Map<string, number>();
+
+function cleanupStaleMaps(): void {
+  const now = Date.now();
+
+  for (const [key, value] of pendingExecutions) {
+    if (now - value.startedAt.getTime() > STALE_ENTRY_TIMEOUT_MS) {
+      pendingExecutions.delete(key);
+    }
+  }
+
+  for (const [key, value] of pendingUserMessages) {
+    if (now - value.timestamp > STALE_ENTRY_TIMEOUT_MS) {
+      pendingUserMessages.delete(key);
+    }
+  }
+
+  for (const [key, timestamp] of callIdTimestamps) {
+    if (now - timestamp > STALE_ENTRY_TIMEOUT_MS) {
+      callIdToPartId.delete(key);
+      callIdTimestamps.delete(key);
+    }
+  }
+
+  for (const [sessionId, messageTimestamps] of tokensCountedBySession) {
+    for (const [messageId, timestamp] of messageTimestamps) {
+      if (now - timestamp > STALE_ENTRY_TIMEOUT_MS) {
+        messageTimestamps.delete(messageId);
+      }
+    }
+    if (messageTimestamps.size === 0) {
+      tokensCountedBySession.delete(sessionId);
+    }
+  }
+}
+
+const cleanupInterval = setInterval(cleanupStaleMaps, CLEANUP_INTERVAL_MS);
+if (cleanupInterval.unref) {
+  cleanupInterval.unref();
+}
 
 export function generateCorrelationId(): string {
   return `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
@@ -88,6 +132,23 @@ export interface PartInfo {
   };
 }
 
+function logError(
+  client: OpencodeClient,
+  message: string,
+  extra: Record<string, unknown>
+): void {
+  Promise.resolve(
+    client.app.log({
+      body: {
+        service: "database",
+        level: "error",
+        message,
+        extra,
+      },
+    })
+  ).catch(() => {});
+}
+
 export const DatabasePlugin: Plugin = async ({ client }) => {
   const connected = await ensureConnection();
 
@@ -111,7 +172,8 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
           case "session.created": {
             const info = props.info as SessionInfo;
 
-            await sql`
+            fireAndForget(
+              () => sql`
               INSERT INTO sessions (id, title, parent_id, project_id, directory, status, created_at)
               VALUES (
                 ${info.id},
@@ -127,39 +189,62 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
                 parent_id = COALESCE(${info.parentID || null}, sessions.parent_id),
                 project_id = COALESCE(${info.projectID || null}, sessions.project_id),
                 directory = COALESCE(${info.directory || null}, sessions.directory)
-            `;
+            `,
+              (error) =>
+                logError(client, "Error in session.created", {
+                  error: String(error),
+                })
+            );
             break;
           }
 
           case "session.updated": {
             const info = props.info as SessionInfo;
-            await sql`
+            fireAndForget(
+              () => sql`
               UPDATE sessions
               SET title = COALESCE(${info.title || null}, title),
                   share_url = COALESCE(${info.share?.url || null}, share_url)
               WHERE id = ${info.id}
-            `;
+            `,
+              (error) =>
+                logError(client, "Error in session.updated", {
+                  error: String(error),
+                })
+            );
             break;
           }
 
           case "session.deleted": {
             const info = props.info as SessionInfo;
-            await sql`
+            fireAndForget(
+              () => sql`
               UPDATE sessions
               SET deleted_at = NOW(), status = 'deleted'
               WHERE id = ${info.id}
-            `;
+            `,
+              (error) =>
+                logError(client, "Error in session.deleted", {
+                  error: String(error),
+                })
+            );
             tokensCountedBySession.delete(info.id);
             break;
           }
 
           case "session.idle": {
             const sessionID = props.sessionID as string;
-            await sql`
+            fireAndForget(
+              () => sql`
               UPDATE sessions
               SET status = 'idle', updated_at = NOW()
               WHERE id = ${sessionID}
-            `;
+            `,
+              (error) =>
+                logError(client, "Error in session.idle", {
+                  error: String(error),
+                })
+            );
             break;
           }
 
@@ -169,7 +254,8 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
               | { name?: string; data?: { message?: string } }
               | undefined;
             if (sessionID) {
-              await sql`
+              fireAndForget(async () => {
+                await sql`
                 INSERT INTO session_errors (session_id, error_type, error_message, error_data)
                 VALUES (
                   ${sessionID},
@@ -178,16 +264,9 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
                   ${error ? sql.json(error as postgres.JSONValue) : null}
                 )
               `;
-              await sql`
+                await sql`
                 UPDATE sessions SET status = 'error' WHERE id = ${sessionID}
               `;
-              await client.app.log({
-                body: {
-                  service: "database",
-                  level: "info",
-                  message: "Session error",
-                  extra: { sessionID, errorMessage: error?.data?.message },
-                },
               });
             }
             break;
@@ -196,56 +275,66 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
           case "session.compacted": {
             const sessionID = props.sessionID as string;
 
-            const [sessionState] = await sql<
-              Array<{
-                context_tokens: number | null;
-                input_tokens: number | null;
-                output_tokens: number | null;
-                cache_read_tokens: number | null;
-                cache_write_tokens: number | null;
-                reasoning_tokens: number | null;
-                estimated_cost: string | null;
-              }>
-            >`
-              SELECT context_tokens, input_tokens, output_tokens,
-                     cache_read_tokens, cache_write_tokens, reasoning_tokens, estimated_cost
-              FROM sessions WHERE id = ${sessionID}
-            `;
+            try {
+              const result = await safeQuery(
+                () => sql<
+                  Array<{
+                    context_tokens: number | null;
+                    input_tokens: number | null;
+                    output_tokens: number | null;
+                    cache_read_tokens: number | null;
+                    cache_write_tokens: number | null;
+                    reasoning_tokens: number | null;
+                    estimated_cost: string | null;
+                  }>
+                >`
+                SELECT context_tokens, input_tokens, output_tokens,
+                       cache_read_tokens, cache_write_tokens, reasoning_tokens, estimated_cost
+                FROM sessions WHERE id = ${sessionID}
+              `
+              );
 
-            if (sessionState) {
-              await sql`
-                INSERT INTO compactions (
-                  session_id,
-                  context_tokens_before,
-                  cumulative_input_tokens,
-                  cumulative_output_tokens,
-                  cumulative_cache_read,
-                  cumulative_cache_write,
-                  cumulative_reasoning,
-                  cumulative_cost
-                )
-                VALUES (
-                  ${sessionID},
-                  ${sessionState.context_tokens || 0},
-                  ${sessionState.input_tokens || 0},
-                  ${sessionState.output_tokens || 0},
-                  ${sessionState.cache_read_tokens || 0},
-                  ${sessionState.cache_write_tokens || 0},
-                  ${sessionState.reasoning_tokens || 0},
-                  ${parseFloat(sessionState.estimated_cost || "0")}
-                )
-              `;
-            }
+              const sessionState = result?.[0];
 
-            await sql`
-              UPDATE sessions
-              SET
-                status = 'compacted',
-                peak_context_tokens = GREATEST(peak_context_tokens, context_tokens),
-                context_tokens = 0,
-                compaction_count = compaction_count + 1
-              WHERE id = ${sessionID}
-            `;
+              if (sessionState) {
+                fireAndForget(
+                  () => sql`
+                  INSERT INTO compactions (
+                    session_id,
+                    context_tokens_before,
+                    cumulative_input_tokens,
+                    cumulative_output_tokens,
+                    cumulative_cache_read,
+                    cumulative_cache_write,
+                    cumulative_reasoning,
+                    cumulative_cost
+                  )
+                  VALUES (
+                    ${sessionID},
+                    ${sessionState.context_tokens || 0},
+                    ${sessionState.input_tokens || 0},
+                    ${sessionState.output_tokens || 0},
+                    ${sessionState.cache_read_tokens || 0},
+                    ${sessionState.cache_write_tokens || 0},
+                    ${sessionState.reasoning_tokens || 0},
+                    ${parseFloat(sessionState.estimated_cost || "0")}
+                  )
+                `
+                );
+              }
+
+              fireAndForget(
+                () => sql`
+                UPDATE sessions
+                SET
+                  status = 'compacted',
+                  peak_context_tokens = GREATEST(peak_context_tokens, context_tokens),
+                  context_tokens = 0,
+                  compaction_count = compaction_count + 1
+                WHERE id = ${sessionID}
+              `
+              );
+            } catch {}
 
             tokensCountedBySession.delete(sessionID);
             break;
@@ -253,11 +342,14 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
 
           case "message.updated": {
             const info = props.info as MessageInfo;
-            await sql`
+
+            fireAndForget(
+              () => sql`
               INSERT INTO sessions (id, status, created_at, updated_at)
               VALUES (${info.sessionID}, 'active', NOW(), NOW())
               ON CONFLICT (id) DO UPDATE SET updated_at = NOW()
-            `;
+            `
+            );
 
             let messageContent:
               | Array<{ type: string; text?: string }>
@@ -279,7 +371,6 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
                       .map((p) => p.text)
                       .join("\n") || null;
                 }
-                // Use system prompt from pending if not already set
                 if (!systemPrompt && pending.systemPrompt) {
                   systemPrompt = pending.systemPrompt;
                 }
@@ -291,7 +382,8 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
               info.providerID || info.model?.providerID || null;
             const modelId = info.modelID || info.model?.modelID || null;
 
-            await sql`
+            fireAndForget(
+              () => sql`
               INSERT INTO messages (id, session_id, role, model_provider, model_id, text, summary, content, system_prompt, created_at)
               VALUES (
                 ${info.id},
@@ -313,11 +405,15 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
                 summary = COALESCE(${info.summary?.title || null}, messages.summary),
                 content = COALESCE(${messageContent ? sql.json(messageContent as postgres.JSONValue) : null}, messages.content),
                 system_prompt = COALESCE(${systemPrompt}, messages.system_prompt)
-            `;
+            `,
+              (error) =>
+                logError(client, "Error in message.updated", {
+                  error: String(error),
+                })
+            );
 
-            // Update session token counts (only once per message)
             const sessionTokens =
-              tokensCountedBySession.get(info.sessionID) || new Set<string>();
+              tokensCountedBySession.get(info.sessionID) || new Map<string, number>();
             if (
               info.role === "assistant" &&
               info.tokens &&
@@ -330,12 +426,13 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
               const cacheWrite = info.tokens.cache?.write ?? 0;
 
               if (inputTokens > 0 || outputTokens > 0) {
-                sessionTokens.add(info.id);
+                sessionTokens.set(info.id, Date.now());
                 tokensCountedBySession.set(info.sessionID, sessionTokens);
 
                 const contextSize = inputTokens + cacheRead;
 
-                await sql`
+                fireAndForget(
+                  () => sql`
                   UPDATE sessions
                   SET
                     input_tokens = input_tokens + ${inputTokens},
@@ -348,7 +445,12 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
                     model_provider = COALESCE(${modelProvider}, model_provider),
                     model_id = COALESCE(${modelId}, model_id)
                   WHERE id = ${info.sessionID}
-                `;
+                `,
+                  (error) =>
+                    logError(client, "Error updating session tokens", {
+                      error: String(error),
+                    })
+                );
               }
             }
             break;
@@ -356,9 +458,11 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
 
           case "message.removed": {
             const messageID = props.messageID as string;
-            await sql`
+            fireAndForget(
+              () => sql`
               DELETE FROM messages WHERE id = ${messageID}
-            `;
+            `
+            );
             break;
           }
 
@@ -369,6 +473,7 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
 
             if (part.type === "tool" && part.callID) {
               callIdToPartId.set(part.callID, part.id);
+              callIdTimestamps.set(part.callID, Date.now());
               const pending = pendingExecutions.get(part.callID);
               if (pending) {
                 pending.partId = part.id;
@@ -376,60 +481,66 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
             }
 
             if (part.type === "step-finish" && part.cost !== undefined) {
-              await sql`
+              const cost = part.cost;
+              fireAndForget(
+                () => sql`
                 UPDATE sessions
-                SET estimated_cost = estimated_cost + ${part.cost}
+                SET estimated_cost = estimated_cost + ${cost}
                 WHERE id = ${part.sessionID}
-              `;
+              `
+              );
             }
 
-            // Ensure parent message exists (part events can fire before message events)
-            await sql`
+            fireAndForget(
+              () => sql`
               INSERT INTO messages (id, session_id, role, created_at)
               VALUES (${part.messageID}, ${part.sessionID}, 'assistant', NOW())
               ON CONFLICT (id) DO UPDATE SET
                 role = COALESCE(messages.role, 'assistant')
-            `;
+            `
+            );
 
-            await sql`
+            fireAndForget(
+              () => sql`
               INSERT INTO sessions (id, status, created_at)
               VALUES (${part.sessionID}, 'active', NOW())
               ON CONFLICT (id) DO NOTHING
-            `;
+            `
+            );
 
             const isStreamingTextPart =
               part.type === "text" || part.type === "reasoning";
             const partAsJson = { ...part };
 
             if (isStreamingTextPart) {
-              await sql`
-                INSERT INTO message_parts (id, message_id, part_type, tool_name, text, content, created_at)
-                VALUES (
-                  ${part.id},
-                  ${part.messageID},
-                  ${part.type},
-                  ${toolName},
-                  ${textContent},
-                  ${sql.json(partAsJson as postgres.JSONValue)},
-                  NOW()
-                )
-                ON CONFLICT (id) DO NOTHING
-              `;
-
-              // Update only if new text is longer (streaming race condition handling)
-              if (textContent) {
+              fireAndForget(async () => {
                 await sql`
-                  UPDATE message_parts
-                  SET
-                    tool_name = COALESCE(${toolName}, tool_name),
-                    text = ${textContent},
-                    content = ${sql.json(partAsJson as postgres.JSONValue)}
-                  WHERE id = ${part.id}
-                    AND (text IS NULL OR LENGTH(text) < LENGTH(${textContent}))
+                  INSERT INTO message_parts (id, message_id, part_type, tool_name, text, content, created_at)
+                  VALUES (
+                    ${part.id},
+                    ${part.messageID},
+                    ${part.type},
+                    ${toolName},
+                    ${textContent},
+                    ${sql.json(partAsJson as postgres.JSONValue)},
+                    NOW()
+                  )
+                  ON CONFLICT (id) DO NOTHING
                 `;
-              }
+
+                if (textContent) {
+                  await sql`
+                    UPDATE message_parts
+                    SET
+                      tool_name = COALESCE(${toolName}, tool_name),
+                      text = ${textContent},
+                      content = ${sql.json(partAsJson as postgres.JSONValue)}
+                    WHERE id = ${part.id}
+                      AND (text IS NULL OR LENGTH(text) < LENGTH(${textContent}))
+                  `;
+                }
+              });
             } else {
-              // Tool parts use status priority to ensure final state wins
               const statusPriority: Record<string, number> = {
                 pending: 1,
                 running: 2,
@@ -439,55 +550,61 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
               const currentStatus = part.state?.status || "pending";
               const currentPriority = statusPriority[currentStatus] || 0;
 
-              await sql`
-                INSERT INTO message_parts (id, message_id, part_type, tool_name, text, content, created_at)
-                VALUES (
-                  ${part.id},
-                  ${part.messageID},
-                  ${part.type},
-                  ${toolName},
-                  ${textContent},
-                  ${sql.json(partAsJson as postgres.JSONValue)},
-                  NOW()
-                )
-                ON CONFLICT (id) DO NOTHING
-              `;
-
-              await sql`
-                UPDATE message_parts
-                SET
-                  tool_name = COALESCE(${toolName}, tool_name),
-                  text = COALESCE(${textContent}, text),
-                  content = ${sql.json(partAsJson as postgres.JSONValue)}
-                WHERE id = ${part.id}
-                  AND ${currentPriority} >= COALESCE(
-                    CASE (content->'state'->>'status')
-                      WHEN 'pending' THEN 1
-                      WHEN 'running' THEN 2
-                      WHEN 'completed' THEN 3
-                      WHEN 'error' THEN 3
-                      ELSE 0
-                    END, 0
+              fireAndForget(async () => {
+                await sql`
+                  INSERT INTO message_parts (id, message_id, part_type, tool_name, text, content, created_at)
+                  VALUES (
+                    ${part.id},
+                    ${part.messageID},
+                    ${part.type},
+                    ${toolName},
+                    ${textContent},
+                    ${sql.json(partAsJson as postgres.JSONValue)},
+                    NOW()
                   )
-              `;
+                  ON CONFLICT (id) DO NOTHING
+                `;
+
+                await sql`
+                  UPDATE message_parts
+                  SET
+                    tool_name = COALESCE(${toolName}, tool_name),
+                    text = COALESCE(${textContent}, text),
+                    content = ${sql.json(partAsJson as postgres.JSONValue)}
+                  WHERE id = ${part.id}
+                    AND ${currentPriority} >= COALESCE(
+                      CASE (content->'state'->>'status')
+                        WHEN 'pending' THEN 1
+                        WHEN 'running' THEN 2
+                        WHEN 'completed' THEN 3
+                        WHEN 'error' THEN 3
+                        ELSE 0
+                      END, 0
+                    )
+                `;
+              });
             }
 
             if (part.type === "text" && textContent) {
-              await sql`
+              fireAndForget(
+                () => sql`
                 UPDATE messages
                 SET text = ${textContent}
                 WHERE id = ${part.messageID}
                   AND (text IS NULL OR LENGTH(text) < LENGTH(${textContent}))
-              `;
+              `
+              );
             }
             break;
           }
 
           case "message.part.removed": {
             const partID = props.partID as string;
-            await sql`
+            fireAndForget(
+              () => sql`
               DELETE FROM message_parts WHERE id = ${partID}
-            `;
+            `
+            );
             break;
           }
 
@@ -495,7 +612,8 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
             const name = props.name as string;
             const sessionID = props.sessionID as string;
             const args = props.arguments as string | undefined;
-            await sql`
+            fireAndForget(
+              () => sql`
               INSERT INTO commands (session_id, command_name, command_args, created_at)
               VALUES (
                 ${sessionID},
@@ -503,30 +621,28 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
                 ${args || null},
                 NOW()
               )
-            `;
+            `
+            );
             break;
           }
         }
       } catch (error) {
-        await client.app.log({
-          body: {
-            service: "database",
-            level: "error",
-            message: "Error recording event",
-            extra: { eventType: event.type, error: String(error) },
-          },
+        logError(client, "Error recording event", {
+          eventType: event.type,
+          error: String(error),
         });
       }
     },
 
     "chat.message": async (input, output) => {
       try {
-        await sql`
+        fireAndForget(
+          () => sql`
           UPDATE sessions SET status = 'active', updated_at = NOW()
           WHERE id = ${input.sessionID}
-        `;
+        `
+        );
 
-        // Capture parts and system prompt for later storage in message.updated
         const systemPrompt = (output.message as { system?: string })?.system;
         if (output.parts && output.parts.length > 0) {
           pendingUserMessages.set(input.sessionID, {
@@ -535,7 +651,6 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
             timestamp: Date.now(),
           });
         } else if (systemPrompt) {
-          // Store system prompt even if no parts
           pendingUserMessages.set(input.sessionID, {
             parts: [],
             systemPrompt,
@@ -543,14 +658,7 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
           });
         }
       } catch (error) {
-        await client.app.log({
-          body: {
-            service: "database",
-            level: "error",
-            message: "Error in chat.message",
-            extra: { error: String(error) },
-          },
-        });
+        logError(client, "Error in chat.message", { error: String(error) });
       }
     },
 
@@ -567,7 +675,8 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
           startedAt,
         });
 
-        await sql`
+        fireAndForget(
+          () => sql`
           INSERT INTO tool_executions (
             correlation_id,
             session_id,
@@ -584,15 +693,15 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
             ${startedAt},
             NOW()
           )
-        `;
+        `,
+          (error) =>
+            logError(client, "Error recording tool start", {
+              error: String(error),
+            })
+        );
       } catch (error) {
-        await client.app.log({
-          body: {
-            service: "database",
-            level: "error",
-            message: "Error recording tool start",
-            extra: { error: String(error) },
-          },
+        logError(client, "Error in tool.execute.before", {
+          error: String(error),
         });
       }
     },
@@ -601,87 +710,90 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
       try {
         const completedAt = new Date();
         const pending = pendingExecutions.get(input.callID);
+        const partId =
+          pending?.partId || callIdToPartId.get(input.callID) || null;
 
         if (pending) {
           const durationMs =
             completedAt.getTime() - pending.startedAt.getTime();
 
-          await sql`
-            UPDATE tool_executions
-            SET
-              result = ${output.output ?? null},
-              completed_at = ${completedAt},
-              duration_ms = ${durationMs},
-              success = true
-            WHERE correlation_id = ${pending.correlationId}
-          `;
-
-          // Sync output to message_parts if part event fired before tool completed
-          const partId = pending.partId || callIdToPartId.get(input.callID);
-          if (partId && output.output) {
-            const outputJson = JSON.stringify(output.output);
+          fireAndForget(async () => {
             await sql`
-              UPDATE message_parts
-              SET content = jsonb_set(
-                COALESCE(content, '{"state":{}}'::jsonb),
-                '{state,output}',
-                ${outputJson}::jsonb
-              )
-              WHERE id = ${partId}
-                AND (content->'state'->>'output') IS NULL
+              UPDATE tool_executions
+              SET
+                result = ${output.output ?? null},
+                completed_at = ${completedAt},
+                duration_ms = ${durationMs},
+                success = true
+              WHERE correlation_id = ${pending.correlationId}
             `;
-          }
+
+            if (partId && output.output) {
+              const outputJson = JSON.stringify(output.output);
+              await sql`
+                UPDATE message_parts
+                SET content = jsonb_set(
+                  COALESCE(content, '{"state":{}}'::jsonb),
+                  '{state,output}',
+                  ${outputJson}::jsonb
+                )
+                WHERE id = ${partId}
+                  AND (content->'state'->>'output') IS NULL
+              `;
+            }
+          });
 
           pendingExecutions.delete(input.callID);
         } else {
-          await sql`
-            INSERT INTO tool_executions (
-              correlation_id,
-              session_id,
-              tool_name,
-              args,
-              result,
-              completed_at,
-              success,
-              created_at
-            )
-            VALUES (
-              ${generateCorrelationId()},
-              ${input.sessionID},
-              ${input.tool},
-              ${output.metadata ?? null},
-              ${output.output ?? null},
-              ${completedAt},
-              true,
-              NOW()
-            )
-          `;
-
-          const partId = callIdToPartId.get(input.callID);
-          if (partId && output.output) {
-            const outputJson = JSON.stringify(output.output);
+          fireAndForget(async () => {
             await sql`
-              UPDATE message_parts
-              SET content = jsonb_set(
-                COALESCE(content, '{"state":{}}'::jsonb),
-                '{state,output}',
-                ${outputJson}::jsonb
+              INSERT INTO tool_executions (
+                correlation_id,
+                session_id,
+                tool_name,
+                args,
+                result,
+                completed_at,
+                success,
+                created_at
               )
-              WHERE id = ${partId}
-                AND (content->'state'->>'output') IS NULL
+              VALUES (
+                ${generateCorrelationId()},
+                ${input.sessionID},
+                ${input.tool},
+                ${output.metadata ?? null},
+                ${output.output ?? null},
+                ${completedAt},
+                true,
+                NOW()
+              )
             `;
-          }
+
+            if (partId && output.output) {
+              const outputJson = JSON.stringify(output.output);
+              await sql`
+                UPDATE message_parts
+                SET content = jsonb_set(
+                  COALESCE(content, '{"state":{}}'::jsonb),
+                  '{state,output}',
+                  ${outputJson}::jsonb
+                )
+                WHERE id = ${partId}
+                  AND (content->'state'->>'output') IS NULL
+              `;
+            }
+          });
         }
 
         callIdToPartId.delete(input.callID);
+        callIdTimestamps.delete(input.callID);
       } catch (error) {
-        await client.app.log({
-          body: {
-            service: "database",
-            level: "error",
-            message: "Error recording tool completion",
-            extra: { error: String(error) },
-          },
+        pendingExecutions.delete(input.callID);
+        callIdToPartId.delete(input.callID);
+        callIdTimestamps.delete(input.callID);
+
+        logError(client, "Error recording tool completion", {
+          error: String(error),
         });
       }
     },

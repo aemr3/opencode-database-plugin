@@ -32,6 +32,15 @@ const mockEnsureConnection = () => Promise.resolve(dbConnected);
 mock.module("../../db", () => ({
   sql: mockSql,
   ensureConnection: mockEnsureConnection,
+  isDatabaseHealthy: () => dbConnected,
+  fireAndForget: (fn: () => Promise<unknown>, onError?: (error: unknown) => void) => {
+    if (!dbConnected) return;
+    fn().catch((e) => onError?.(e));
+  },
+  safeQuery: async <T>(fn: () => Promise<T>) => {
+    if (!dbConnected) return undefined;
+    return fn();
+  },
   jsonb: (value: unknown) => ({ toJSON: () => value }),
 }));
 
@@ -813,16 +822,17 @@ describe("Tool Execution and Message Part Linking", () => {
       { args: { filePath: "/etc/passwd" } },
     );
 
-    sqlCalls = []; // Reset to check only the after calls
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    sqlCalls = [];
 
-    // Complete tool execution with output
     const fileContent = "root:x:0:0:root:/root:/bin/bash";
     await hooks["tool.execute.after"]?.(
       { tool: "read", sessionID: "sess-456", callID: "call-update-test" },
       { title: "Read", output: fileContent, metadata: {} },
     );
 
-    // Should have 2 SQL calls: UPDATE tool_executions + UPDATE message_parts
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
     expect(sqlCalls.length).toBe(2);
     expect(sqlCalls[0]!.query).toContain("UPDATE tool_executions");
     expect(sqlCalls[1]!.query).toContain("UPDATE message_parts");
