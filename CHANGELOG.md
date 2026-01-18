@@ -1,3 +1,9 @@
+## v1.0.10 (2026-01-18)
+
+### Fix
+
+- Ensure database inserts happen in correct order to prevent FK violations
+
 ## v1.0.9 (2026-01-18)
 
 ### Fix
