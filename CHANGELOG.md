@@ -1,3 +1,9 @@
+## v1.0.11 (2026-01-18)
+
+### Fix
+
+- Increase database connection pool max from 10 to 30
+
 ## v1.0.10 (2026-01-18)
 
 ### Fix
