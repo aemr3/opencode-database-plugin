@@ -1,3 +1,9 @@
+## v1.0.9 (2026-01-18)
+
+### Fix
+
+- Make database operations non-blocking with health tracking
+
 ## v1.0.8 (2026-01-09)
 
 ### Fix
