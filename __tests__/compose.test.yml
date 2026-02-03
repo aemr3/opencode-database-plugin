@@ -14,6 +14,7 @@ services:
       - 24096:4096
     volumes:
       - ../dist/index.js:/root/.config/opencode/plugin/database-plugin.js:ro
+      - ./opencode.test.json:/root/.config/opencode/opencode.json
     environment:
       - OPENCODE_DATABASE_URL=postgres://opencode:opencode@postgres:5432/opencode
     depends_on:

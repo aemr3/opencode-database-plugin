@@ -153,7 +153,7 @@ describe("Database Plugin - Messages", () => {
     expect(assistantMessage).toBeDefined();
     expect(assistantMessage?.model_provider).toBeDefined();
     expect(assistantMessage?.model_id).toBeDefined();
-  }, 60000); // 60s timeout for LLM call
+  }, 300000); // 5 min timeout for LLM call
 });
 
 describe("Database Plugin - Tool Executions", () => {
