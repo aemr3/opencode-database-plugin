@@ -89,6 +89,9 @@ export interface MessageInfo {
   id: string;
   sessionID: string;
   role: string;
+  time?: {
+    created?: number;
+  };
   model?: { providerID?: string; modelID?: string };
   providerID?: string;
   modelID?: string;
@@ -373,6 +376,9 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
             const modelProvider =
               info.providerID || info.model?.providerID || null;
             const modelId = info.modelID || info.model?.modelID || null;
+            const messageCreatedAt = info.time?.created
+              ? new Date(info.time.created)
+              : null;
 
             fireAndForget(
               async () => {
@@ -394,7 +400,7 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
                     ${info.summary?.title || null},
                     ${messageContent ? sql.json(messageContent as postgres.JSONValue) : null},
                     ${systemPrompt},
-                    NOW()
+                    COALESCE(${messageCreatedAt}, NOW())
                   )
                   ON CONFLICT (id) DO UPDATE SET
                     role = ${info.role},
@@ -403,7 +409,8 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
                     text = COALESCE(${textContent}, messages.text),
                     summary = COALESCE(${info.summary?.title || null}, messages.summary),
                     content = COALESCE(${messageContent ? sql.json(messageContent as postgres.JSONValue) : null}, messages.content),
-                    system_prompt = COALESCE(${systemPrompt}, messages.system_prompt)
+                    system_prompt = COALESCE(${systemPrompt}, messages.system_prompt),
+                    created_at = COALESCE(${messageCreatedAt}, messages.created_at)
                 `;
               },
               (error) =>
