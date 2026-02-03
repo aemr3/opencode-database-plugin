@@ -45,6 +45,9 @@ export interface MessageInfo {
   id: string;
   sessionID: string;
   role: string;
+  time?: {
+    created?: number;
+  };
   model?: { providerID?: string; modelID?: string };
   providerID?: string;
   modelID?: string;
@@ -291,6 +294,11 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
               info.providerID || info.model?.providerID || null;
             const modelId = info.modelID || info.model?.modelID || null;
 
+            const messageCreatedAt = info.time?.created
+              ? new Date(info.time.created)
+              : null;
+            const createdAt = messageCreatedAt ?? new Date();
+
             await sql`
               INSERT INTO messages (id, session_id, role, model_provider, model_id, text, summary, content, system_prompt, created_at)
               VALUES (
@@ -303,7 +311,7 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
                 ${info.summary?.title || null},
                 ${messageContent ? sql.json(messageContent as postgres.JSONValue) : null},
                 ${systemPrompt},
-                NOW()
+                ${createdAt}
               )
               ON CONFLICT (id) DO UPDATE SET
                 role = ${info.role},
@@ -312,7 +320,8 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
                 text = COALESCE(${textContent}, messages.text),
                 summary = COALESCE(${info.summary?.title || null}, messages.summary),
                 content = COALESCE(${messageContent ? sql.json(messageContent as postgres.JSONValue) : null}, messages.content),
-                system_prompt = COALESCE(${systemPrompt}, messages.system_prompt)
+                system_prompt = COALESCE(${systemPrompt}, messages.system_prompt),
+                created_at = COALESCE(${messageCreatedAt}, messages.created_at)
             `;
 
             // Update session token counts (only once per message)
