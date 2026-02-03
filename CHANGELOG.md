@@ -1,3 +1,9 @@
+## v1.0.12 (2026-02-03)
+
+### Fix
+
+- use SDK message timestamps for created_at
+
 ## v1.0.11 (2026-01-18)
 
 ### Fix
