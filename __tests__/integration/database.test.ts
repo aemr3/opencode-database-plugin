@@ -169,7 +169,7 @@ describe("Database Plugin - Tool Executions", () => {
     const { data: response, error } = await client!.session.prompt({
       path: { id: session!.id },
       body: {
-        parts: [{ type: "text", text: "Run the command: echo 'hello test'" }],
+        parts: [{ type: "text", text: "Use the bash tool to run: echo 'hello test'" }],
       },
     });
 
@@ -250,7 +250,7 @@ describe("Database Plugin - File Operations", () => {
         parts: [
           {
             type: "text",
-            text: "Read the file /etc/hostname and show me its contents.",
+            text: "Use the read tool to read /etc/hostname and show me its contents.",
           },
         ],
       },
@@ -308,7 +308,7 @@ describe("Database Plugin - File Operations", () => {
         parts: [
           {
             type: "text",
-            text: "Create a file called /tmp/test-audit.txt with the content 'Hello from audit test'",
+            text: "Use the write tool to create /tmp/test-audit.txt with the content 'Hello from audit test'",
           },
         ],
       },
@@ -349,7 +349,7 @@ describe("Database Plugin - File Operations", () => {
     const { data: response, error } = await client!.session.prompt({
       path: { id: session!.id },
       body: {
-        parts: [{ type: "text", text: "Read /etc/hostname" }],
+        parts: [{ type: "text", text: "Use the read tool to read /etc/hostname" }],
       },
     });
 
