@@ -5,6 +5,8 @@ let sqlCalls: Array<{ query: string; values: unknown[] }> = [];
 let dbConnected = true;
 // Mock response for SELECT queries (used by session.compacted)
 let mockSelectResponse: unknown[] = [];
+// Queries containing this take a real round trip's time instead of resolving at once
+let slowQuery: string | null = null;
 
 // Create mock SQL function
 const mockSql = Object.assign(
@@ -16,6 +18,9 @@ const mockSql = Object.assign(
       const response = mockSelectResponse;
       mockSelectResponse = []; // Reset after use
       return Promise.resolve(response);
+    }
+    if (slowQuery && query.includes(slowQuery)) {
+      return new Promise((resolve) => setTimeout(() => resolve([]), 20));
     }
     return Promise.resolve([]);
   },
@@ -80,6 +85,7 @@ beforeEach(() => {
   sqlCalls = [];
   dbConnected = true;
   mockSelectResponse = [];
+  slowQuery = null;
   fireAndForgetPromises = [];
 });
 
@@ -232,6 +238,63 @@ describe("Session Events", () => {
     expect(sqlCalls.length).toBe(1);
     expect(sqlCalls[0]!.query).toContain("UPDATE sessions");
     expect(sqlCalls[0]!.query).toContain("idle");
+  });
+
+  test("session.idle after session.error runs after the error's writes and keeps the error", async () => {
+    const hooks = await DatabasePlugin(mockContext);
+    slowQuery = "INSERT INTO session_errors";
+
+    await hooks.event?.({
+      event: {
+        type: "session.error",
+        properties: {
+          sessionID: "sess-123",
+          error: { name: "MessageAbortedError", data: { message: "Aborted" } },
+        },
+      } as any,
+    });
+    await hooks.event?.({
+      event: {
+        type: "session.idle",
+        properties: { sessionID: "sess-123" },
+      } as any,
+    });
+
+    await flushFireAndForget();
+
+    const queries = sqlCalls.map((c) => c.query);
+    expect(queries).toHaveLength(3);
+    expect(queries[0]).toContain("INSERT INTO session_errors");
+    expect(queries[1]).toContain("status = 'error'");
+    expect(queries[2]).toContain("status = 'idle'");
+    expect(queries[2]).toContain("status IS DISTINCT FROM 'error'");
+  });
+
+  test("a new prompt after session.error sets the session active after the error's writes", async () => {
+    const hooks = await DatabasePlugin(mockContext);
+    slowQuery = "INSERT INTO session_errors";
+
+    await hooks.event?.({
+      event: {
+        type: "session.error",
+        properties: {
+          sessionID: "sess-123",
+          error: { name: "UnknownError", data: { message: "Failed to read file" } },
+        },
+      } as any,
+    });
+    await hooks["chat.message"]?.(
+      { sessionID: "sess-123" },
+      { message: {} as any, parts: [] as any },
+    );
+
+    await flushFireAndForget();
+
+    const queries = sqlCalls.map((c) => c.query);
+    expect(queries).toHaveLength(3);
+    expect(queries[0]).toContain("INSERT INTO session_errors");
+    expect(queries[1]).toContain("status = 'error'");
+    expect(queries[2]).toContain("status = 'active'");
   });
 
   test("session.status is ignored (active status set via message events)", async () => {
