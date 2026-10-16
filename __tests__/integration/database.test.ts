@@ -120,7 +120,7 @@ describe("Database Plugin - Messages", () => {
     testSessionIds.push(session!.id);
 
     // Send a simple prompt - this should succeed with valid API key
-    const { data: response } = await client!.session.prompt({
+    const { data: response, error } = await client!.session.prompt({
       path: { id: session!.id },
       body: {
         parts: [{ type: "text", text: "Say hello in exactly 3 words." }],
@@ -128,6 +128,7 @@ describe("Database Plugin - Messages", () => {
     });
 
     // Verify the response has no error (API key is valid)
+    expect(error).toBeUndefined();
     expect(response).toBeDefined();
     expect(response!.info.error).toBeUndefined();
     expect(response!.info.role).toBe("assistant");
@@ -165,7 +166,7 @@ describe("Database Plugin - Tool Executions", () => {
     testSessionIds.push(session!.id);
 
     // Send a prompt that should trigger a tool call (e.g., bash)
-    const { data: response } = await client!.session.prompt({
+    const { data: response, error } = await client!.session.prompt({
       path: { id: session!.id },
       body: {
         parts: [{ type: "text", text: "Run the command: echo 'hello test'" }],
@@ -173,6 +174,7 @@ describe("Database Plugin - Tool Executions", () => {
     });
 
     // Verify the response has no error (API key is valid)
+    expect(error).toBeUndefined();
     expect(response).toBeDefined();
     expect(response!.info.error).toBeUndefined();
 
@@ -203,13 +205,14 @@ describe("Database Plugin - Reasoning/Thinking", () => {
     testSessionIds.push(session!.id);
 
     // Send a prompt that should trigger reasoning
-    const { data: response } = await client!.session.prompt({
+    const { data: response, error } = await client!.session.prompt({
       path: { id: session!.id },
       body: {
         parts: [{ type: "text", text: "What is 2+2? Think step by step." }],
       },
     });
 
+    expect(error).toBeUndefined();
     expect(response).toBeDefined();
     expect(response!.info.error).toBeUndefined();
 
@@ -241,7 +244,7 @@ describe("Database Plugin - File Operations", () => {
     testSessionIds.push(session!.id);
 
     // Request to read a simple file
-    const { data: response } = await client!.session.prompt({
+    const { data: response, error } = await client!.session.prompt({
       path: { id: session!.id },
       body: {
         parts: [
@@ -253,6 +256,7 @@ describe("Database Plugin - File Operations", () => {
       },
     });
 
+    expect(error).toBeUndefined();
     expect(response).toBeDefined();
     expect(response!.info.error).toBeUndefined();
 
@@ -298,7 +302,7 @@ describe("Database Plugin - File Operations", () => {
     testSessionIds.push(session!.id);
 
     // Request to create and write a test file
-    const { data: response } = await client!.session.prompt({
+    const { data: response, error } = await client!.session.prompt({
       path: { id: session!.id },
       body: {
         parts: [
@@ -310,6 +314,7 @@ describe("Database Plugin - File Operations", () => {
       },
     });
 
+    expect(error).toBeUndefined();
     expect(response).toBeDefined();
     expect(response!.info.error).toBeUndefined();
 
@@ -343,13 +348,14 @@ describe("Database Plugin - File Operations", () => {
     testSessionIds.push(session!.id);
 
     // Request a simple read operation
-    const { data: response } = await client!.session.prompt({
+    const { data: response, error } = await client!.session.prompt({
       path: { id: session!.id },
       body: {
         parts: [{ type: "text", text: "Read /etc/hostname" }],
       },
     });
 
+    expect(error).toBeUndefined();
     expect(response).toBeDefined();
     expect(response!.info.error).toBeUndefined();
 
