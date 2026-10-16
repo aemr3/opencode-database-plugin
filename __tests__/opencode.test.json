@@ -1,5 +1,5 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "opencode/big-pickle",
+  "model": "opencode/glm-5.3-flash-free",
   "permission": "allow"
 }

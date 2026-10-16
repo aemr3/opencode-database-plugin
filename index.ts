@@ -32,6 +32,28 @@ const pendingUserMessages = new Map<
 
 const tokensCountedBySession = new Map<string, Map<string, number>>();
 const callIdTimestamps = new Map<string, number>();
+const statusWrites = new Map<string, Promise<void>>();
+
+/**
+ * Runs `write` once every earlier status write for the session has settled. The writes
+ * are fire-and-forget, so without this an error's two queries could land after the
+ * single query of an event OpenCode reported later.
+ */
+function afterEarlierStatusWrites(
+  sessionID: string,
+  write: () => Promise<unknown>
+): Promise<unknown> {
+  const next = (statusWrites.get(sessionID) ?? Promise.resolve()).then(write);
+  const settled = next.then(
+    () => {},
+    () => {}
+  );
+  statusWrites.set(sessionID, settled);
+  void settled.then(() => {
+    if (statusWrites.get(sessionID) === settled) statusWrites.delete(sessionID);
+  });
+  return next;
+}
 
 function cleanupStaleMaps(): void {
   const now = Date.now();
@@ -238,12 +260,18 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
 
           case "session.idle": {
             const sessionID = props.sessionID as string;
+            // A failed run reports session.error and then session.idle; the error stays
+            // until the next prompt sets the session active again
             fireAndForget(
-              () => sql`
+              () =>
+                afterEarlierStatusWrites(
+                  sessionID,
+                  () => sql`
               UPDATE sessions
               SET status = 'idle', updated_at = NOW()
-              WHERE id = ${sessionID}
-            `,
+              WHERE id = ${sessionID} AND status IS DISTINCT FROM 'error'
+            `
+                ),
               (error) =>
                 logError(client, "Error in session.idle", {
                   error: String(error),
@@ -258,8 +286,9 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
               | { name?: string; data?: { message?: string } }
               | undefined;
             if (sessionID) {
-              fireAndForget(async () => {
-                await sql`
+              fireAndForget(() =>
+                afterEarlierStatusWrites(sessionID, async () => {
+                  await sql`
                 INSERT INTO session_errors (session_id, error_type, error_message, error_data)
                 VALUES (
                   ${sessionID},
@@ -268,10 +297,11 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
                   ${error ? sql.json(error as postgres.JSONValue) : null}
                 )
               `;
-                await sql`
+                  await sql`
                 UPDATE sessions SET status = 'error' WHERE id = ${sessionID}
               `;
-              });
+                })
+              );
             }
             break;
           }
@@ -661,11 +691,14 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
 
     "chat.message": async (input, output) => {
       try {
-        fireAndForget(
-          () => sql`
+        fireAndForget(() =>
+          afterEarlierStatusWrites(
+            input.sessionID,
+            () => sql`
           UPDATE sessions SET status = 'active', updated_at = NOW()
           WHERE id = ${input.sessionID}
         `
+          )
         );
 
         const systemPrompt = (output.message as { system?: string })?.system;
