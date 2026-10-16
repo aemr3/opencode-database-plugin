@@ -1,3 +1,9 @@
+## v1.0.14 (2026-10-16)
+
+### Fix
+
+- keep a failed run's error status when the session goes idle (#7)
+
 ## v1.0.13 (2026-10-16)
 
 ### Fix
