@@ -1,3 +1,9 @@
+## v1.0.13 (2026-10-16)
+
+### Fix
+
+- keep synthetic parts out of a user message's text (#6)
+
 ## v1.0.12 (2026-02-03)
 
 ### Fix
