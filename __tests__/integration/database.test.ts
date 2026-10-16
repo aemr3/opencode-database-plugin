@@ -271,10 +271,10 @@ describe("Database Plugin - File Operations", () => {
 
     expect(readExecutions.length).toBeGreaterThanOrEqual(1);
 
-    const readExec = readExecutions[0]!;
-    // Args should contain the file path
-    expect(readExec.args).toBeDefined();
-    expect(readExec.args.filePath).toBeDefined();
+    // The model can get a call's arguments wrong and retry, so look for the call that has
+    // them rather than taking the first
+    const readExec = readExecutions.find((e) => e.args?.filePath)!;
+    expect(readExec).toBeDefined();
 
     // Result may or may not be present depending on timing of tool.execute.after hook
     // The main thing we're testing is that the tool execution was recorded with args
@@ -329,11 +329,9 @@ describe("Database Plugin - File Operations", () => {
 
     expect(writeExecutions.length).toBeGreaterThanOrEqual(1);
 
-    const writeExec = writeExecutions[0]!;
-    // Args should contain file path and content
-    expect(writeExec.args).toBeDefined();
-    expect(writeExec.args.filePath).toBeDefined();
-    expect(writeExec.args.content).toBeDefined();
+    // As above: the call that has its arguments, not necessarily the first
+    const writeExec = writeExecutions.find((e) => e.args?.filePath && e.args?.content)!;
+    expect(writeExec).toBeDefined();
     expect(writeExec.args.content).toContain("Hello from audit test");
 
     // Should have completed (success may be true or null depending on timing)
@@ -372,8 +370,9 @@ describe("Database Plugin - File Operations", () => {
 
     expect(toolParts.length).toBeGreaterThanOrEqual(1);
 
-    const toolPart = toolParts[0]!;
-    // Content should contain the full tool state
+    // As above: the call whose input has a file path, not necessarily the first
+    const toolPart = toolParts.find((p) => p.content?.state?.input?.filePath)!;
+    expect(toolPart).toBeDefined();
     expect(toolPart.content).toBeDefined();
 
     // Verify state structure exists
