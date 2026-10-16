@@ -193,7 +193,7 @@ describe("Database Plugin - Tool Executions", () => {
       expect(bashExecution.duration_ms).toBeGreaterThan(0);
       expect(bashExecution.success).toBe(true);
     }
-  }, 90000); // 90s timeout for tool execution
+  }, 300000); // 5 min timeout for LLM call
 });
 
 describe("Database Plugin - Reasoning/Thinking", () => {
@@ -232,7 +232,7 @@ describe("Database Plugin - Reasoning/Thinking", () => {
       expect(reasoningParts[0]!.text).toBeTruthy();
       expect(reasoningParts[0]!.text.length).toBeGreaterThan(0);
     }
-  }, 60000);
+  }, 300000);
 });
 
 describe("Database Plugin - File Operations", () => {
@@ -292,7 +292,7 @@ describe("Database Plugin - File Operations", () => {
     if (readExec.duration_ms !== null) {
       expect(readExec.duration_ms).toBeGreaterThan(0);
     }
-  }, 90000);
+  }, 300000);
 
   test("write tool captures file path and written content", async () => {
     const { data: session } = await client!.session.create({
@@ -338,7 +338,7 @@ describe("Database Plugin - File Operations", () => {
 
     // Should have completed (success may be true or null depending on timing)
     expect([true, null]).toContain(writeExec.success);
-  }, 90000);
+  }, 300000);
 
   test("message_parts stores complete tool state with input and output", async () => {
     const { data: session } = await client!.session.create({
@@ -399,7 +399,7 @@ describe("Database Plugin - File Operations", () => {
         expect(state.output).not.toBeNull();
       }
     }
-  }, 90000);
+  }, 300000);
 });
 
 describe("Database Plugin - Database Schema", () => {
