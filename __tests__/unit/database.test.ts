@@ -360,6 +360,48 @@ describe("Message Events", () => {
     expect(sqlCalls[1]!.values).toContain("assistant");
   });
 
+  test("message.updated stores only the user's own text, not synthetic parts", async () => {
+    const hooks = await DatabasePlugin(mockContext);
+
+    await hooks["chat.message"]?.(
+      { sessionID: "sess-456" },
+      {
+        message: {} as any,
+        parts: [
+          { type: "text", text: "What does the file say?", id: "p1" },
+          {
+            type: "text",
+            text: 'Called the Read tool with the following input: {"filePath":"notes.txt"}',
+            synthetic: true,
+            id: "p2",
+          },
+          { type: "text", text: "The file contents", synthetic: true, id: "p3" },
+          { type: "file", mime: "text/plain", filename: "notes.txt", id: "p4" },
+        ] as any,
+      },
+    );
+
+    await hooks.event?.({
+      event: {
+        type: "message.updated",
+        properties: {
+          info: { id: "msg-123", sessionID: "sess-456", role: "user" },
+        },
+      } as any,
+    });
+
+    await flushFireAndForget();
+
+    const messageInsert = sqlCalls.find((c) => c.query.includes("INSERT INTO messages"));
+    expect(messageInsert).toBeDefined();
+    expect(messageInsert!.values).toContain("What does the file say?");
+    expect(
+      messageInsert!.values.some(
+        (v) => typeof v === "string" && v.includes("The file contents"),
+      ),
+    ).toBe(false);
+  });
+
   test("message.removed deletes message", async () => {
     const hooks = await DatabasePlugin(mockContext);
 
@@ -411,6 +453,32 @@ describe("Message Part Events", () => {
     expect(partInsert).toBeDefined();
     expect(partInsert!.values).toContain("part-123");
     expect(partInsert!.values).toContain("text");
+  });
+
+  test("message.part.updated stores a synthetic part without copying it onto the message", async () => {
+    const hooks = await DatabasePlugin(mockContext);
+
+    await hooks.event?.({
+      event: {
+        type: "message.part.updated",
+        properties: {
+          part: {
+            id: "part-123",
+            sessionID: "sess-789",
+            messageID: "msg-456",
+            type: "text",
+            text: "The contents of an attached file, longer than the prompt",
+            synthetic: true,
+          },
+        },
+      } as any,
+    });
+
+    await flushFireAndForget();
+
+    const queries = sqlCalls.map((c) => c.query);
+    expect(queries.some((q) => q.includes("INSERT INTO message_parts"))).toBe(true);
+    expect(queries.some((q) => q.includes("UPDATE messages"))).toBe(false);
   });
 
   test("message.part.updated extracts tool name for tool parts", async () => {

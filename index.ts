@@ -95,7 +95,7 @@ export interface MessageInfo {
   model?: { providerID?: string; modelID?: string };
   providerID?: string;
   modelID?: string;
-  parts?: Array<{ type: string; text?: string }>;
+  parts?: Array<{ type: string; text?: string; synthetic?: boolean }>;
   summary?: { title?: string };
   system?: string;
   tokens?: {
@@ -113,6 +113,7 @@ export interface PartInfo {
   type: string;
   tool?: string;
   text?: string;
+  synthetic?: boolean;
   callID?: string;
   state?: {
     status?: string;
@@ -347,7 +348,7 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
             const info = props.info as MessageInfo;
 
             let messageContent:
-              | Array<{ type: string; text?: string }>
+              | Array<{ type: string; text?: string; synthetic?: boolean }>
               | undefined = info.parts;
             let textContent: string | null = null;
             let systemPrompt: string | null = info.system || null;
@@ -359,10 +360,14 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
                   messageContent = pending.parts as Array<{
                     type: string;
                     text?: string;
+                    synthetic?: boolean;
                   }>;
+                  // OpenCode adds synthetic text parts to a user message, such as an
+                  // attached file's contents and a note that it was read; they aren't
+                  // what the user wrote
                   textContent =
                     messageContent
-                      .filter((p) => p.type === "text" && p.text)
+                      .filter((p) => p.type === "text" && p.text && !p.synthetic)
                       .map((p) => p.text)
                       .join("\n") || null;
                 }
@@ -603,7 +608,9 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
               });
             }
 
-            if (part.type === "text" && textContent) {
+            // A synthetic part, such as an attached file's contents, would otherwise
+            // replace the user's own text whenever it is the longer of the two
+            if (part.type === "text" && textContent && !part.synthetic) {
               fireAndForget(
                 () => sql`
                 UPDATE messages
