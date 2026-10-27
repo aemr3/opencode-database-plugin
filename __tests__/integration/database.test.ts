@@ -428,7 +428,9 @@ describe("Database Plugin - Database Schema", () => {
     expect(columnNames).toContain("id");
     expect(columnNames).toContain("session_id");
     expect(columnNames).toContain("role");
-    expect(columnNames).toContain("content");
+    expect(columnNames).toContain("system_prompt");
+    expect(columnNames).not.toContain("text");
+    expect(columnNames).not.toContain("content");
   });
 
   test("tool_executions table exists with correct columns", async () => {
