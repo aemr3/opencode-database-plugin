@@ -30,9 +30,7 @@ CREATE TABLE IF NOT EXISTS messages (
     role TEXT NOT NULL,
     model_provider TEXT,
     model_id TEXT,
-    text TEXT,
     summary TEXT,
-    content JSONB,
     system_prompt TEXT
 );
 
@@ -121,8 +119,9 @@ CREATE INDEX IF NOT EXISTS idx_compactions_created_at ON compactions(created_at 
 
 CREATE INDEX IF NOT EXISTS idx_sessions_title_fts
   ON sessions USING GIN (to_tsvector('english', COALESCE(title, '')));
-CREATE INDEX IF NOT EXISTS idx_messages_text_fts
-  ON messages USING GIN (to_tsvector('english', COALESCE(text, '')));
+CREATE INDEX IF NOT EXISTS idx_message_parts_text_fts
+  ON message_parts USING GIN (to_tsvector('english', COALESCE(text, '')))
+  WHERE part_type = 'text';
 
 CREATE OR REPLACE FUNCTION update_updated_at_column()
 RETURNS TRIGGER AS $$
@@ -167,26 +166,3 @@ CREATE TRIGGER update_commands_updated_at
     BEFORE UPDATE ON commands
     FOR EACH ROW
     EXECUTE FUNCTION update_updated_at_column();
-
-CREATE OR REPLACE VIEW conversation_view AS
-SELECT
-    m.id as message_id,
-    m.session_id,
-    m.role,
-    m.model_provider,
-    m.model_id,
-    m.created_at,
-    m.text,
-    m.summary,
-    COALESCE(
-        string_agg(
-            CASE WHEN mp.part_type = 'reasoning' THEN mp.text END,
-            E'\n'
-        ),
-        ''
-    ) as reasoning,
-    array_agg(DISTINCT mp.tool_name) FILTER (WHERE mp.tool_name IS NOT NULL) as tools_used
-FROM messages m
-LEFT JOIN message_parts mp ON m.id = mp.message_id
-GROUP BY m.id, m.session_id, m.role, m.model_provider, m.model_id, m.created_at, m.text, m.summary
-ORDER BY m.created_at;

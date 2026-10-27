@@ -55,9 +55,20 @@ psql $OPENCODE_DATABASE_URL -f sql/schema.sql
 | `commands`        | Executed slash commands                                    |
 | `compactions`     | Context compaction history                                 |
 
-### Views
+A message's text and files are its parts in `message_parts`. Databases set up from an
+older schema also have `messages.text`, `messages.content` and `conversation_view`, which
+the plugin no longer writes; drop them once nothing reads them:
 
-- `conversation_view` - Aggregated view of messages with reasoning and tools used
+```sql
+DROP VIEW IF EXISTS conversation_view;
+ALTER TABLE messages DROP COLUMN IF EXISTS text, DROP COLUMN IF EXISTS content;
+```
+
+### Failed writes
+
+A write the database can't take yet, because it is unreachable, starting up or shutting
+down, is retried for about 30 seconds. One that still fails is reported through OpenCode's
+log under the `database` service.
 
 ## Development
 
