@@ -1,4 +1,5 @@
 import { describe, test, expect, mock, beforeEach, afterEach } from "bun:test";
+import { withRetry } from "../../retry";
 
 // Track SQL calls for assertions
 let sqlCalls: Array<{ query: string; values: unknown[] }> = [];
@@ -7,12 +8,18 @@ let dbConnected = true;
 let mockSelectResponse: unknown[] = [];
 // Queries containing this take a real round trip's time instead of resolving at once
 let slowQuery: string | null = null;
+// The next `times` queries containing `query` fail with an error carrying `code`
+let failing: { query: string; code: string; times: number } | null = null;
 
 // Create mock SQL function
-const mockSql = Object.assign(
+const mockSql: any = Object.assign(
   (strings: TemplateStringsArray, ...values: unknown[]) => {
     const query = strings.join("?");
     sqlCalls.push({ query, values });
+    if (failing && failing.times > 0 && query.includes(failing.query)) {
+      failing.times--;
+      return Promise.reject(Object.assign(new Error(failing.code), { code: failing.code }));
+    }
     // Return mock session data for SELECT queries when configured
     if (query.includes("SELECT") && mockSelectResponse.length > 0) {
       const response = mockSelectResponse;
@@ -28,6 +35,7 @@ const mockSql = Object.assign(
     // Add any methods that might be called on sql
     end: () => Promise.resolve(),
     json: (value: unknown) => ({ toJSON: () => value }),
+    begin: (fn: (tx: unknown) => Promise<unknown>) => fn(mockSql),
   },
 );
 
@@ -40,15 +48,11 @@ let fireAndForgetPromises: Promise<unknown>[] = [];
 mock.module("../../db", () => ({
   sql: mockSql,
   ensureConnection: mockEnsureConnection,
-  isDatabaseHealthy: () => dbConnected,
-  fireAndForget: (fn: () => Promise<unknown>, onError?: (error: unknown) => void) => {
-    if (!dbConnected) return;
-    const promise = fn().catch((e) => onError?.(e));
+  fireAndForget: (fn: () => Promise<unknown>, onError: (error: unknown) => void) => {
+    if (!dbConnected) return Promise.resolve();
+    const promise = withRetry(fn, [0, 0]).then(() => {}, onError);
     fireAndForgetPromises.push(promise);
-  },
-  safeQuery: async <T>(fn: () => Promise<T>) => {
-    if (!dbConnected) return undefined;
-    return fn();
+    return promise;
   },
   jsonb: (value: unknown) => ({ toJSON: () => value }),
 }));
@@ -62,11 +66,16 @@ async function flushFireAndForget() {
 // Import after mocking
 import { DatabasePlugin, generateCorrelationId } from "../../index";
 
+let loggedErrors: string[] = [];
+
 // Mock plugin context
 const mockContext = {
   client: {
     app: {
-      log: () => Promise.resolve(),
+      log: ({ body }: { body: { level: string; message: string } }) => {
+        if (body.level === "error") loggedErrors.push(body.message);
+        return Promise.resolve();
+      },
     },
   } as any,
   project: {
@@ -86,6 +95,8 @@ beforeEach(() => {
   dbConnected = true;
   mockSelectResponse = [];
   slowQuery = null;
+  failing = null;
+  loggedErrors = [];
   fireAndForgetPromises = [];
 });
 
@@ -297,6 +308,31 @@ describe("Session Events", () => {
     expect(queries[2]).toContain("status = 'active'");
   });
 
+  test("a status write retried after the database was unreachable lands before later ones", async () => {
+    const hooks = await DatabasePlugin(mockContext);
+    failing = { query: "status = 'active'", code: "ECONNREFUSED", times: 1 };
+
+    await hooks["chat.message"]?.(
+      { sessionID: "sess-123" },
+      { message: {} as any, parts: [] as any },
+    );
+    await hooks.event?.({
+      event: {
+        type: "session.idle",
+        properties: { sessionID: "sess-123" },
+      } as any,
+    });
+
+    await flushFireAndForget();
+
+    const queries = sqlCalls.map((c) => c.query);
+    expect(queries).toHaveLength(3);
+    expect(queries[0]).toContain("status = 'active'");
+    expect(queries[1]).toContain("status = 'active'");
+    expect(queries[2]).toContain("status = 'idle'");
+    expect(loggedErrors).toEqual([]);
+  });
+
   test("session.status is ignored (active status set via message events)", async () => {
     const hooks = await DatabasePlugin(mockContext);
 
@@ -423,13 +459,13 @@ describe("Message Events", () => {
     expect(sqlCalls[1]!.values).toContain("assistant");
   });
 
-  test("message.updated stores only the user's own text, not synthetic parts", async () => {
+  test("message.updated stores the system prompt sent with a user message and none of its parts", async () => {
     const hooks = await DatabasePlugin(mockContext);
 
     await hooks["chat.message"]?.(
       { sessionID: "sess-456" },
       {
-        message: {} as any,
+        message: { system: "Answer in one sentence." } as any,
         parts: [
           { type: "text", text: "What does the file say?", id: "p1" },
           {
@@ -457,12 +493,46 @@ describe("Message Events", () => {
 
     const messageInsert = sqlCalls.find((c) => c.query.includes("INSERT INTO messages"));
     expect(messageInsert).toBeDefined();
-    expect(messageInsert!.values).toContain("What does the file say?");
+    expect(messageInsert!.values).toContain("Answer in one sentence.");
     expect(
       messageInsert!.values.some(
-        (v) => typeof v === "string" && v.includes("The file contents"),
+        (v) =>
+          (typeof v === "string" && (v.includes("file say") || v.includes("file contents"))) ||
+          (typeof v === "object" && v !== null && "toJSON" in v),
       ),
     ).toBe(false);
+  });
+
+  test("message.updated keeps a system prompt to the user message it came with", async () => {
+    const hooks = await DatabasePlugin(mockContext);
+
+    await hooks["chat.message"]?.(
+      { sessionID: "sess-456" },
+      { message: { system: "Answer in one sentence." } as any, parts: [] as any },
+    );
+    await hooks.event?.({
+      event: {
+        type: "message.updated",
+        properties: { info: { id: "msg-1", sessionID: "sess-456", role: "user" } },
+      } as any,
+    });
+    await hooks["chat.message"]?.(
+      { sessionID: "sess-456" },
+      { message: {} as any, parts: [] as any },
+    );
+    await hooks.event?.({
+      event: {
+        type: "message.updated",
+        properties: { info: { id: "msg-2", sessionID: "sess-456", role: "user" } },
+      } as any,
+    });
+
+    await flushFireAndForget();
+
+    const inserts = sqlCalls.filter((c) => c.query.includes("INSERT INTO messages"));
+    expect(inserts).toHaveLength(2);
+    expect(inserts[0]!.values).toContain("Answer in one sentence.");
+    expect(inserts[1]!.values).not.toContain("Answer in one sentence.");
   });
 
   test("message.removed deletes message", async () => {
@@ -504,8 +574,8 @@ describe("Message Part Events", () => {
 
     await flushFireAndForget();
 
-    // 5 calls: insert session, insert message, insert part, update part, update message text
-    expect(sqlCalls.length).toBe(5);
+    // 4 calls: insert session, insert message, insert part, update part
+    expect(sqlCalls.length).toBe(4);
     const queries = sqlCalls.map((c) => c.query);
     expect(queries.some((q) => q.includes("INSERT INTO sessions"))).toBe(true);
     expect(queries.some((q) => q.includes("INSERT INTO messages"))).toBe(true);
@@ -518,7 +588,7 @@ describe("Message Part Events", () => {
     expect(partInsert!.values).toContain("text");
   });
 
-  test("message.part.updated stores a synthetic part without copying it onto the message", async () => {
+  test("message.part.updated stores a text part without copying it onto the message", async () => {
     const hooks = await DatabasePlugin(mockContext);
 
     await hooks.event?.({
@@ -530,8 +600,7 @@ describe("Message Part Events", () => {
             sessionID: "sess-789",
             messageID: "msg-456",
             type: "text",
-            text: "The contents of an attached file, longer than the prompt",
-            synthetic: true,
+            text: "Hello world",
           },
         },
       } as any,
@@ -569,6 +638,57 @@ describe("Message Part Events", () => {
     expect(sqlCalls[0]!.query).toContain("INSERT INTO sessions");
     expect(sqlCalls[1]!.query).toContain("INSERT INTO messages");
     expect(sqlCalls[2]!.values).toContain("bash");
+  });
+
+  test("message.part.updated logs a write that fails for good", async () => {
+    const hooks = await DatabasePlugin(mockContext);
+    failing = { query: "INSERT INTO message_parts", code: "42703", times: 1 };
+
+    await hooks.event?.({
+      event: {
+        type: "message.part.updated",
+        properties: {
+          part: {
+            id: "part-123",
+            sessionID: "sess-789",
+            messageID: "msg-456",
+            type: "text",
+            text: "Hello world",
+          },
+        },
+      } as any,
+    });
+
+    await flushFireAndForget();
+
+    expect(sqlCalls.filter((c) => c.query.includes("INSERT INTO message_parts"))).toHaveLength(1);
+    expect(loggedErrors).toEqual(["Error in message.part.updated"]);
+  });
+
+  test("message.part.updated retries a write the database could not take yet", async () => {
+    const hooks = await DatabasePlugin(mockContext);
+    failing = { query: "INSERT INTO message_parts", code: "57P03", times: 1 };
+
+    await hooks.event?.({
+      event: {
+        type: "message.part.updated",
+        properties: {
+          part: {
+            id: "part-123",
+            sessionID: "sess-789",
+            messageID: "msg-456",
+            type: "text",
+            text: "Hello world",
+          },
+        },
+      } as any,
+    });
+
+    await flushFireAndForget();
+
+    expect(sqlCalls.filter((c) => c.query.includes("INSERT INTO message_parts"))).toHaveLength(2);
+    expect(sqlCalls.at(-1)!.query).toContain("UPDATE message_parts");
+    expect(loggedErrors).toEqual([]);
   });
 
   test("message.part.removed deletes part", async () => {
@@ -615,7 +735,7 @@ describe("Command Events", () => {
 });
 
 describe("Chat Message Hook", () => {
-  test("chat.message updates session status and stores pending user message parts", async () => {
+  test("chat.message sets the session active", async () => {
     const hooks = await DatabasePlugin(mockContext);
 
     await hooks["chat.message"]?.(
@@ -696,6 +816,30 @@ describe("Tool Execution Hooks", () => {
     expect(sqlCalls[1]!.query).toContain("duration_ms");
     // Verify output is stored
     expect(sqlCalls[1]!.values).toContain(fullOutput);
+  });
+
+  test("tool.execute.after updates the execution only once its start is recorded", async () => {
+    const hooks = await DatabasePlugin(mockContext);
+    slowQuery = "INSERT INTO tool_executions";
+
+    await hooks["tool.execute.before"]?.(
+      { tool: "bash", sessionID: "sess-123", callID: "call-456" },
+      { args: { command: "echo hi" } },
+    );
+    await hooks["tool.execute.after"]?.(
+      { tool: "bash", sessionID: "sess-123", callID: "call-456" },
+      { title: "Bash", output: "hi", metadata: { exitCode: 0 } },
+    );
+
+    // The insert is still in flight, so the update must not have been sent yet
+    expect(sqlCalls.map((c) => c.query)).toHaveLength(1);
+
+    await flushFireAndForget();
+
+    const queries = sqlCalls.map((c) => c.query);
+    expect(queries).toHaveLength(2);
+    expect(queries[0]).toContain("INSERT INTO tool_executions");
+    expect(queries[1]).toContain("UPDATE tool_executions");
   });
 
   test("tool.execute.after records read tool with file contents", async () => {
