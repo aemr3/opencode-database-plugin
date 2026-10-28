@@ -818,6 +818,30 @@ describe("Tool Execution Hooks", () => {
     expect(sqlCalls[1]!.values).toContain(fullOutput);
   });
 
+  test("tool.execute.after updates the execution only once its start is recorded", async () => {
+    const hooks = await DatabasePlugin(mockContext);
+    slowQuery = "INSERT INTO tool_executions";
+
+    await hooks["tool.execute.before"]?.(
+      { tool: "bash", sessionID: "sess-123", callID: "call-456" },
+      { args: { command: "echo hi" } },
+    );
+    await hooks["tool.execute.after"]?.(
+      { tool: "bash", sessionID: "sess-123", callID: "call-456" },
+      { title: "Bash", output: "hi", metadata: { exitCode: 0 } },
+    );
+
+    // The insert is still in flight, so the update must not have been sent yet
+    expect(sqlCalls.map((c) => c.query)).toHaveLength(1);
+
+    await flushFireAndForget();
+
+    const queries = sqlCalls.map((c) => c.query);
+    expect(queries).toHaveLength(2);
+    expect(queries[0]).toContain("INSERT INTO tool_executions");
+    expect(queries[1]).toContain("UPDATE tool_executions");
+  });
+
   test("tool.execute.after records read tool with file contents", async () => {
     const hooks = await DatabasePlugin(mockContext);
 

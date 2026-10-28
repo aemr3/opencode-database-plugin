@@ -16,6 +16,7 @@ const pendingExecutions = new Map<
     args: Record<string, unknown>;
     startedAt: Date;
     partId?: string;
+    recorded: Promise<void>;
   }
 >();
 
@@ -706,15 +707,7 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
         const correlationId = generateCorrelationId();
         const startedAt = new Date();
 
-        pendingExecutions.set(input.callID, {
-          correlationId,
-          sessionId: input.sessionID,
-          toolName: input.tool,
-          args: output.args || {},
-          startedAt,
-        });
-
-        fireAndForget(
+        const recorded = fireAndForget(
           () => sql`
           INSERT INTO tool_executions (
             correlation_id,
@@ -738,6 +731,15 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
               error: String(error),
             })
         );
+
+        pendingExecutions.set(input.callID, {
+          correlationId,
+          sessionId: input.sessionID,
+          toolName: input.tool,
+          args: output.args || {},
+          startedAt,
+          recorded,
+        });
       } catch (error) {
         logError(client, "Error in tool.execute.before", {
           error: String(error),
@@ -761,6 +763,8 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
             completedAt.getTime() - pending.startedAt.getTime();
 
           fireAndForget(async () => {
+            // An update that ran before the start's insert landed would match nothing
+            await pending.recorded;
             await sql`
               UPDATE tool_executions
               SET
