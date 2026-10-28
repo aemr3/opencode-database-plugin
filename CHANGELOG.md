@@ -1,3 +1,15 @@
+## v2.0.0 (2026-10-28)
+
+### BREAKING CHANGE
+
+- messages.text and messages.content are no longer written, and
+conversation_view and idx_messages_text_fts are gone from the schema. A message's
+text and files are its parts in message_parts.
+
+### Feat
+
+- stop writing messages.text and messages.content, and retry failed writes (#8)
+
 ## v1.0.14 (2026-10-16)
 
 ### Fix
