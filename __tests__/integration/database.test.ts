@@ -38,6 +38,32 @@ afterAll(async () => {
   await stopTestStack();
 }, 60000);
 
+/**
+ * Models sometimes answer with what a tool would return instead of calling it, so a prompt
+ * that leaves no tool call in OpenCode's own copy of the session is sent once more in a new
+ * session. A call OpenCode made that the database is missing still fails the test.
+ */
+async function promptForToolCall(title: string, text: string): Promise<string> {
+  for (let attempt = 1; ; attempt++) {
+    const { data: session } = await client!.session.create({ body: { title } });
+    expect(session).toBeDefined();
+    testSessionIds.push(session!.id);
+
+    const { data: response, error } = await client!.session.prompt({
+      path: { id: session!.id },
+      body: { parts: [{ type: "text", text }] },
+    });
+    expect(error).toBeUndefined();
+    expect(response).toBeDefined();
+    expect(response!.info.error).toBeUndefined();
+
+    const { data: messages } = await client!.session.messages({ path: { id: session!.id } });
+    if (messages?.some((m) => m.parts.some((p) => p.type === "tool"))) return session!.id;
+    if (attempt === 2) throw new Error(`The model answered without calling a tool, twice: ${text}`);
+    console.log(`[test] The model answered without calling a tool, sending again: ${text}`);
+  }
+}
+
 describe("Database Plugin - Session Events", () => {
   test("session.created logs to database", async () => {
     const { data: session } = await client!.session.create({
@@ -159,31 +185,17 @@ describe("Database Plugin - Messages", () => {
 
 describe("Database Plugin - Tool Executions", () => {
   test("tool executions are logged with duration", async () => {
-    const { data: session } = await client!.session.create({
-      body: { title: "Tool Execution Test" },
-    });
-    expect(session).toBeDefined();
-    testSessionIds.push(session!.id);
-
-    // Send a prompt that should trigger a tool call (e.g., bash)
-    const { data: response, error } = await client!.session.prompt({
-      path: { id: session!.id },
-      body: {
-        parts: [{ type: "text", text: "Use the bash tool to run: echo 'hello test'" }],
-      },
-    });
-
-    // Verify the response has no error (API key is valid)
-    expect(error).toBeUndefined();
-    expect(response).toBeDefined();
-    expect(response!.info.error).toBeUndefined();
+    const sessionId = await promptForToolCall(
+      "Tool Execution Test",
+      "Use the bash tool to run: echo 'hello test'"
+    );
 
     // Wait for plugin to process
     await Bun.sleep(2000);
 
     // Check tool executions were logged
     const executions = await sql!`
-      SELECT * FROM tool_executions WHERE session_id = ${session!.id}
+      SELECT * FROM tool_executions WHERE session_id = ${sessionId}
     `;
 
     expect(executions.length).toBeGreaterThanOrEqual(1);
@@ -237,36 +249,18 @@ describe("Database Plugin - Reasoning/Thinking", () => {
 
 describe("Database Plugin - File Operations", () => {
   test("read tool captures file path and content", async () => {
-    const { data: session } = await client!.session.create({
-      body: { title: "Read File Test" },
-    });
-    expect(session).toBeDefined();
-    testSessionIds.push(session!.id);
-
-    // Request to read a simple file
-    const { data: response, error } = await client!.session.prompt({
-      path: { id: session!.id },
-      body: {
-        parts: [
-          {
-            type: "text",
-            text: "Use the read tool to read /etc/hostname and show me its contents.",
-          },
-        ],
-      },
-    });
-
-    expect(error).toBeUndefined();
-    expect(response).toBeDefined();
-    expect(response!.info.error).toBeUndefined();
+    const sessionId = await promptForToolCall(
+      "Read File Test",
+      "Use the read tool to read /etc/hostname and show me its contents."
+    );
 
     // Wait for plugin to process
     await Bun.sleep(3000);
 
     // Check tool_executions for read tool
     const readExecutions = await sql!`
-      SELECT * FROM tool_executions 
-      WHERE session_id = ${session!.id} AND tool_name = 'read'
+      SELECT * FROM tool_executions
+      WHERE session_id = ${sessionId} AND tool_name = 'read'
     `;
 
     expect(readExecutions.length).toBeGreaterThanOrEqual(1);
@@ -295,36 +289,18 @@ describe("Database Plugin - File Operations", () => {
   }, 300000);
 
   test("write tool captures file path and written content", async () => {
-    const { data: session } = await client!.session.create({
-      body: { title: "Write File Test" },
-    });
-    expect(session).toBeDefined();
-    testSessionIds.push(session!.id);
-
-    // Request to create and write a test file
-    const { data: response, error } = await client!.session.prompt({
-      path: { id: session!.id },
-      body: {
-        parts: [
-          {
-            type: "text",
-            text: "Use the write tool to create /tmp/test-audit.txt with the content 'Hello from audit test'",
-          },
-        ],
-      },
-    });
-
-    expect(error).toBeUndefined();
-    expect(response).toBeDefined();
-    expect(response!.info.error).toBeUndefined();
+    const sessionId = await promptForToolCall(
+      "Write File Test",
+      "Use the write tool to create /tmp/test-audit.txt with the content 'Hello from audit test'"
+    );
 
     // Wait for plugin to process
     await Bun.sleep(3000);
 
     // Check tool_executions for write tool
     const writeExecutions = await sql!`
-      SELECT * FROM tool_executions 
-      WHERE session_id = ${session!.id} AND tool_name = 'write'
+      SELECT * FROM tool_executions
+      WHERE session_id = ${sessionId} AND tool_name = 'write'
     `;
 
     expect(writeExecutions.length).toBeGreaterThanOrEqual(1);
@@ -339,33 +315,20 @@ describe("Database Plugin - File Operations", () => {
   }, 300000);
 
   test("message_parts stores complete tool state with input and output", async () => {
-    const { data: session } = await client!.session.create({
-      body: { title: "Tool State Test" },
-    });
-    expect(session).toBeDefined();
-    testSessionIds.push(session!.id);
-
-    // Request a simple read operation
-    const { data: response, error } = await client!.session.prompt({
-      path: { id: session!.id },
-      body: {
-        parts: [{ type: "text", text: "Use the read tool to read /etc/hostname" }],
-      },
-    });
-
-    expect(error).toBeUndefined();
-    expect(response).toBeDefined();
-    expect(response!.info.error).toBeUndefined();
+    const sessionId = await promptForToolCall(
+      "Tool State Test",
+      "Use the read tool to read /etc/hostname"
+    );
 
     // Wait for plugin to process
     await Bun.sleep(3000);
 
     // Check message_parts for tool parts
     const toolParts = await sql!`
-      SELECT mp.* 
+      SELECT mp.*
       FROM message_parts mp
       JOIN messages m ON mp.message_id = m.id
-      WHERE m.session_id = ${session!.id} AND mp.part_type = 'tool' AND mp.tool_name = 'read'
+      WHERE m.session_id = ${sessionId} AND mp.part_type = 'tool' AND mp.tool_name = 'read'
     `;
 
     expect(toolParts.length).toBeGreaterThanOrEqual(1);
