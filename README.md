@@ -82,8 +82,8 @@ bun run typecheck
 # Run unit tests
 bun run test
 
-# Run integration tests
-bun run test:integration
+# Run integration tests (Docker, and a paid model through OPENCODE_API_KEY)
+OPENCODE_API_KEY=... bun run test:integration
 
 # Build
 bun run build

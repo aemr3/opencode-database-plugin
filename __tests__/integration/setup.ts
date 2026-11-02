@@ -48,6 +48,8 @@ export async function startTestStack(): Promise<void> {
 }
 
 export async function stopTestStack(): Promise<void> {
+  await printOpencodeWarnings();
+
   console.log("[test] Stopping test Docker stack...");
 
   const proc = Bun.spawn(
@@ -69,6 +71,41 @@ export async function stopTestStack(): Promise<void> {
   );
 
   await proc.exited;
+}
+
+/**
+ * The plugin reports failed writes through OpenCode's log, and a provider that stops
+ * answering shows up there too; both are lost once the stack goes down.
+ */
+async function printOpencodeWarnings(): Promise<void> {
+  const proc = Bun.spawn(
+    [
+      "docker",
+      "compose",
+      "-p",
+      PROJECT_NAME,
+      "-f",
+      COMPOSE_FILE,
+      "logs",
+      "--no-color",
+      "--no-log-prefix",
+      "opencode",
+    ],
+    {
+      stdout: "pipe",
+      stderr: "inherit",
+      cwd: PROJECT_ROOT,
+    },
+  );
+
+  const lines = (await new Response(proc.stdout).text())
+    .split("\n")
+    .filter((line) => /level=(ERROR|WARN)\b/.test(line));
+  await proc.exited;
+
+  if (lines.length === 0) return;
+  console.log("[test] OpenCode warnings and errors:");
+  for (const line of lines) console.log(line);
 }
 
 async function waitForServices(maxRetries = 60): Promise<void> {
