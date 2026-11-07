@@ -57,6 +57,11 @@ mock.module("../../db", () => ({
   jsonb: (value: unknown) => ({ toJSON: () => value }),
 }));
 
+// The queries a test made, but for the check for unfinished tool parts a session going idle runs
+function writes() {
+  return sqlCalls.filter((c) => !c.query.includes("IN ('pending', 'running')"));
+}
+
 // Helper to wait for all fireAndForget operations to complete
 async function flushFireAndForget() {
   await Promise.all(fireAndForgetPromises);
@@ -67,6 +72,9 @@ async function flushFireAndForget() {
 import { DatabasePlugin, generateCorrelationId } from "../../index";
 
 let loggedErrors: string[] = [];
+// The messages OpenCode holds, by ID, and the reads of them; one it lacks fails to read
+let sessionMessages: Record<string, { info: unknown; parts: unknown[] }> = {};
+let sessionMessageReads: unknown[] = [];
 
 // Mock plugin context
 const mockContext = {
@@ -75,6 +83,13 @@ const mockContext = {
       log: ({ body }: { body: { level: string; message: string } }) => {
         if (body.level === "error") loggedErrors.push(body.message);
         return Promise.resolve();
+      },
+    },
+    session: {
+      message: (options: { path: { messageID: string } }) => {
+        sessionMessageReads.push(options);
+        const data = sessionMessages[options.path.messageID];
+        return Promise.resolve(data ? { data } : { error: { name: "NotFoundError" } });
       },
     },
   } as any,
@@ -97,6 +112,8 @@ beforeEach(() => {
   slowQuery = null;
   failing = null;
   loggedErrors = [];
+  sessionMessages = {};
+  sessionMessageReads = [];
   fireAndForgetPromises = [];
 });
 
@@ -246,9 +263,9 @@ describe("Session Events", () => {
 
     await flushFireAndForget();
 
-    expect(sqlCalls.length).toBe(1);
-    expect(sqlCalls[0]!.query).toContain("UPDATE sessions");
-    expect(sqlCalls[0]!.query).toContain("idle");
+    expect(writes().length).toBe(1);
+    expect(writes()[0]!.query).toContain("UPDATE sessions");
+    expect(writes()[0]!.query).toContain("idle");
   });
 
   test("session.idle after session.error runs after the error's writes and keeps the error", async () => {
@@ -273,7 +290,7 @@ describe("Session Events", () => {
 
     await flushFireAndForget();
 
-    const queries = sqlCalls.map((c) => c.query);
+    const queries = writes().map((c) => c.query);
     expect(queries).toHaveLength(3);
     expect(queries[0]).toContain("INSERT INTO session_errors");
     expect(queries[1]).toContain("status = 'error'");
@@ -325,7 +342,7 @@ describe("Session Events", () => {
 
     await flushFireAndForget();
 
-    const queries = sqlCalls.map((c) => c.query);
+    const queries = writes().map((c) => c.query);
     expect(queries).toHaveLength(3);
     expect(queries[0]).toContain("status = 'active'");
     expect(queries[1]).toContain("status = 'active'");
@@ -425,6 +442,83 @@ describe("Session Events", () => {
     expect(sqlCalls[1]!.query).toContain("INSERT INTO compactions");
     expect(sqlCalls[2]!.query).toContain("UPDATE sessions");
     expect(sqlCalls[2]!.query).toContain("compacted");
+  });
+
+  describe("once a session goes idle", () => {
+    const toolPart = (id: string, messageID: string, status: string) => ({
+      id,
+      messageID,
+      sessionID: "sess-123",
+      type: "tool",
+      tool: "StructuredOutput",
+      callID: `call-${id}`,
+      state: { status },
+    });
+    const idle = async () => {
+      const hooks = await DatabasePlugin(mockContext);
+      await hooks.event?.({
+        event: { type: "session.idle", properties: { sessionID: "sess-123" } } as any,
+      });
+      await flushFireAndForget();
+    };
+    const partUpdates = () =>
+      sqlCalls.filter((c) => c.query.includes("UPDATE message_parts"));
+
+    test("writes a tool part it left unfinished again, as OpenCode holds it", async () => {
+      mockSelectResponse = [{ id: "prt-stuck", message_id: "msg-a" }];
+      sessionMessages = {
+        "msg-a": {
+          info: { role: "assistant" },
+          parts: [toolPart("prt-done", "msg-a", "completed"), toolPart("prt-stuck", "msg-a", "completed")],
+        },
+      };
+
+      await idle();
+
+      expect(sessionMessageReads).toEqual([{ path: { id: "sess-123", messageID: "msg-a" } }]);
+      const updates = partUpdates();
+      expect(updates).toHaveLength(1);
+      expect(updates[0]?.values).toContain("prt-stuck");
+      // The completed status outranks the running one the lost write left
+      expect(updates[0]?.values).toContain(3);
+      expect(loggedErrors).toEqual([]);
+    });
+
+    test("reads each message holding an unfinished part once", async () => {
+      mockSelectResponse = [
+        { id: "prt-1", message_id: "msg-a" },
+        { id: "prt-2", message_id: "msg-a" },
+        { id: "prt-3", message_id: "msg-b" },
+      ];
+      sessionMessages = {
+        "msg-a": {
+          info: { role: "assistant" },
+          parts: [toolPart("prt-1", "msg-a", "completed"), toolPart("prt-2", "msg-a", "error")],
+        },
+        "msg-b": { info: { role: "assistant" }, parts: [toolPart("prt-3", "msg-b", "completed")] },
+      };
+
+      await idle();
+
+      expect(sessionMessageReads).toHaveLength(2);
+      expect(partUpdates()).toHaveLength(3);
+    });
+
+    test("reads nothing back while every tool part is finished", async () => {
+      await idle();
+
+      expect(sessionMessageReads).toEqual([]);
+      expect(partUpdates()).toEqual([]);
+    });
+
+    test("reports a message it could not read back", async () => {
+      mockSelectResponse = [{ id: "prt-stuck", message_id: "msg-gone" }];
+
+      await idle();
+
+      expect(partUpdates()).toEqual([]);
+      expect(loggedErrors).toEqual(["Error writing unfinished tool parts"]);
+    });
   });
 });
 
