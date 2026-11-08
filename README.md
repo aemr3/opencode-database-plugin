@@ -70,6 +70,12 @@ A write the database can't take yet, because it is unreachable, starting up or s
 down, is retried for about 30 seconds. One that still fails is reported through OpenCode's
 log under the `database` service.
 
+A write can also go unanswered and never fail, as on a connection that died under load, which
+would leave a tool call pending or running for good. So once a session goes idle, the plugin
+looks for its tool calls that still are, and only if it finds any, reads their messages back
+from OpenCode and writes those tool calls again as OpenCode holds them. A tool call's row only
+ever moves on to a later status, so writing it twice is safe.
+
 ## Development
 
 ```bash

@@ -157,6 +157,71 @@ export interface PartInfo {
   };
 }
 
+const TOOL_STATUS_PRIORITY: Record<string, number> = {
+  pending: 1,
+  running: 2,
+  completed: 3,
+  error: 3,
+};
+
+/**
+ * Writes a part other than streaming text, never moving a tool part back to an earlier
+ * status, so updates that land out of order, and the same update written twice, are safe.
+ */
+async function writePart(part: PartInfo): Promise<void> {
+  const toolName = part.type === "tool" ? part.tool || null : null;
+  const textContent = part.text || null;
+  const partAsJson = { ...part };
+  const currentPriority =
+    TOOL_STATUS_PRIORITY[part.state?.status || "pending"] || 0;
+
+  // Insert in correct order: session -> message -> message_parts
+  await sql`
+    INSERT INTO sessions (id, status, created_at)
+    VALUES (${part.sessionID}, 'active', NOW())
+    ON CONFLICT (id) DO NOTHING
+  `;
+
+  await sql`
+    INSERT INTO messages (id, session_id, role, created_at)
+    VALUES (${part.messageID}, ${part.sessionID}, 'assistant', NOW())
+    ON CONFLICT (id) DO UPDATE SET
+      role = COALESCE(messages.role, 'assistant')
+  `;
+
+  await sql`
+    INSERT INTO message_parts (id, message_id, part_type, tool_name, text, content, created_at)
+    VALUES (
+      ${part.id},
+      ${part.messageID},
+      ${part.type},
+      ${toolName},
+      ${textContent},
+      ${sql.json(partAsJson as postgres.JSONValue)},
+      NOW()
+    )
+    ON CONFLICT (id) DO NOTHING
+  `;
+
+  await sql`
+    UPDATE message_parts
+    SET
+      tool_name = COALESCE(${toolName}, tool_name),
+      text = COALESCE(${textContent}, text),
+      content = ${sql.json(partAsJson as postgres.JSONValue)}
+    WHERE id = ${part.id}
+      AND ${currentPriority} >= COALESCE(
+        CASE (content->'state'->>'status')
+          WHEN 'pending' THEN 1
+          WHEN 'running' THEN 2
+          WHEN 'completed' THEN 3
+          WHEN 'error' THEN 3
+          ELSE 0
+        END, 0
+      )
+  `;
+}
+
 function logError(
   client: OpencodeClient,
   message: string,
@@ -270,6 +335,40 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
             `,
               (error) =>
                 logError(client, "Error in session.idle", {
+                  error: String(error),
+                })
+            );
+            // A tool part's last update can go unwritten, as when its query never gets an
+            // answer, leaving the part pending or running for good. Once the session is idle
+            // none should be, so any that are get written again as OpenCode holds them; writePart
+            // keeps whichever status is further on. Each part's own message is read rather than
+            // the session's list, which OpenCode fails to return for a session asked for
+            // structured output.
+            fireAndForget(
+              async () => {
+                const unfinished = await sql<{ id: string; message_id: string }[]>`
+                  SELECT p.id, p.message_id FROM message_parts p
+                  JOIN messages m ON m.id = p.message_id
+                  WHERE m.session_id = ${sessionID} AND p.part_type = 'tool'
+                    AND p.content->'state'->>'status' IN ('pending', 'running')
+                `;
+                const ids = new Set(unfinished.map((row) => row.id));
+                for (const messageID of new Set(unfinished.map((row) => row.message_id))) {
+                  const { data, error } = await client.session.message({
+                    path: { id: sessionID, messageID },
+                  });
+                  if (!data) {
+                    throw new Error(
+                      `Reading message ${messageID} failed: ${JSON.stringify(error)}`
+                    );
+                  }
+                  for (const part of data.parts) {
+                    if (ids.has(part.id)) await writePart(part as PartInfo);
+                  }
+                }
+              },
+              (error) =>
+                logError(client, "Error writing unfinished tool parts", {
                   error: String(error),
                 })
             );
@@ -572,62 +671,7 @@ export const DatabasePlugin: Plugin = async ({ client }) => {
                 }
               }, onPartError);
             } else {
-              const statusPriority: Record<string, number> = {
-                pending: 1,
-                running: 2,
-                completed: 3,
-                error: 3,
-              };
-              const currentStatus = part.state?.status || "pending";
-              const currentPriority = statusPriority[currentStatus] || 0;
-
-              fireAndForget(async () => {
-                // Insert in correct order: session -> message -> message_parts
-                await sql`
-                  INSERT INTO sessions (id, status, created_at)
-                  VALUES (${part.sessionID}, 'active', NOW())
-                  ON CONFLICT (id) DO NOTHING
-                `;
-
-                await sql`
-                  INSERT INTO messages (id, session_id, role, created_at)
-                  VALUES (${part.messageID}, ${part.sessionID}, 'assistant', NOW())
-                  ON CONFLICT (id) DO UPDATE SET
-                    role = COALESCE(messages.role, 'assistant')
-                `;
-
-                await sql`
-                  INSERT INTO message_parts (id, message_id, part_type, tool_name, text, content, created_at)
-                  VALUES (
-                    ${part.id},
-                    ${part.messageID},
-                    ${part.type},
-                    ${toolName},
-                    ${textContent},
-                    ${sql.json(partAsJson as postgres.JSONValue)},
-                    NOW()
-                  )
-                  ON CONFLICT (id) DO NOTHING
-                `;
-
-                await sql`
-                  UPDATE message_parts
-                  SET
-                    tool_name = COALESCE(${toolName}, tool_name),
-                    text = COALESCE(${textContent}, text),
-                    content = ${sql.json(partAsJson as postgres.JSONValue)}
-                  WHERE id = ${part.id}
-                    AND ${currentPriority} >= COALESCE(
-                      CASE (content->'state'->>'status')
-                        WHEN 'pending' THEN 1
-                        WHEN 'running' THEN 2
-                        WHEN 'completed' THEN 3
-                        WHEN 'error' THEN 3
-                        ELSE 0
-                      END, 0
-                    )
-                `;
-              }, onPartError);
+              fireAndForget(() => writePart(part), onPartError);
             }
             break;
           }
