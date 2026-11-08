@@ -1,3 +1,9 @@
+## v2.0.1 (2026-11-08)
+
+### Fix
+
+- finish tool calls left unfinished once a session goes idle (#10)
+
 ## v2.0.0 (2026-10-28)
 
 ### BREAKING CHANGE
